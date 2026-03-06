@@ -1,5 +1,6 @@
 use bytes::Buf;
-use rug::Integer;
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive};
 
 const TERMINAL: u8 = 0;
 const FIRST_SIGN: u8 = 0b1000_0000u8;
@@ -77,17 +78,19 @@ fn size_decode<B: Buf>(v: &mut B) -> (bool, u32, usize) {
     (sign, size, i)
 }
 
-pub fn bigint_to_storage(bigint: Integer) -> Vec<u8> {
-    let is_neg = bigint < 0;
+pub fn bigint_to_storage(bigint: BigInt) -> Vec<u8> {
+    let is_neg = bigint.is_negative();
     let mut int = bigint.abs();
-    let size = int.significant_bits() + 1;
+    let size = int.bits() as u32 + 1;
     let num_bytes = (size / 8) + u32::from(size % 8 != 0);
     let size_bytes = size_encode(num_bytes);
     let mut number_vec = Vec::with_capacity(size_bytes.len() + num_bytes as usize + 1);
     for _ in 0..num_bytes {
-        let byte = int.to_u8_wrapping();
+        let byte = (&int & &BigInt::from(0xFFu8))
+            .to_u8()
+            .unwrap_or(0);
         number_vec.push(byte);
-        int >>= 8;
+        int >>= 8u32;
     }
     number_vec.extend(size_bytes);
     if is_neg {
@@ -99,16 +102,17 @@ pub fn bigint_to_storage(bigint: Integer) -> Vec<u8> {
     number_vec
 }
 
-pub fn storage_to_bigint_and_sign<B: Buf>(bytes: &mut B) -> (Integer, bool) {
+pub fn storage_to_bigint_and_sign<B: Buf>(bytes: &mut B) -> (BigInt, bool) {
     let (is_pos, size, _) = size_decode(bytes);
-    let mut int = Integer::new();
+    let mut int = BigInt::from(0);
     if size == 0 {
         return (int, is_pos);
     }
     for _ in 0..size {
-        int <<= 8;
+        int <<= 8u32;
         let b = bytes.get_u8();
-        int += if is_pos { b } else { !b };
+        let b_val = if is_pos { b } else { !b };
+        int += BigInt::from(b_val);
     }
     if !is_pos {
         int = -int;
@@ -116,6 +120,6 @@ pub fn storage_to_bigint_and_sign<B: Buf>(bytes: &mut B) -> (Integer, bool) {
     (int, is_pos)
 }
 
-pub fn storage_to_bigint<B: Buf>(bytes: &mut B) -> Integer {
+pub fn storage_to_bigint<B: Buf>(bytes: &mut B) -> BigInt {
     storage_to_bigint_and_sign(bytes).0
 }

@@ -26,7 +26,7 @@ impl TypedDictEntry {
         self.entry.to_bytes()
     }
 
-    pub fn as_buf(&self) -> SizedDictEntryBuf {
+    pub fn as_buf(&self) -> SizedDictEntryBuf<'_> {
         self.entry.as_buf()
     }
 
@@ -526,7 +526,7 @@ impl<B1: BufMut, B2: BufMut, B3: BufMut, B4: BufMut> TypedDictBufBuilder<B1, B2,
 mod tests {
     use bytes::BytesMut;
     use chrono::{NaiveDate, NaiveDateTime};
-    use rug::Integer;
+    use num_bigint::BigInt;
 
     use crate::Decimal;
 
@@ -712,8 +712,8 @@ mod tests {
         assert!(j.is_nan())
     }
 
-    fn int(s: &str) -> Integer {
-        s.parse::<Integer>().unwrap()
+    fn int(s: &str) -> BigInt {
+        s.parse::<BigInt>().unwrap()
     }
 
     #[test]
@@ -827,7 +827,7 @@ mod tests {
             Decimal::make_entry(&Decimal("0".to_string())),
             f32::make_entry(&4.389832_f32),
             f32::make_entry(&23434.389_f32),
-            Integer::make_entry(&int("239487329872343987")),
+            BigInt::make_entry(&int("239487329872343987")),
         ];
         vec.sort();
         let mut used_types = BytesMut::new();
@@ -931,7 +931,7 @@ mod tests {
             Decimal::make_entry(&Decimal("0".to_string())),
             f32::make_entry(&4.389832_f32),
             f32::make_entry(&23434.389832_f32),
-            Integer::make_entry(&int("239487329872343987")),
+            BigInt::make_entry(&int("239487329872343987")),
         ];
         vec.sort();
         let mut used_types = BytesMut::new();
@@ -1023,7 +1023,7 @@ mod tests {
             Decimal::make_entry(&Decimal("0".to_string())),
             f32::make_entry(&4.389832_f32),
             f32::make_entry(&23434.389_f32),
-            Integer::make_entry(&int("239487329872343987")),
+            BigInt::make_entry(&int("239487329872343987")),
         ];
         vec.sort();
 
@@ -1068,7 +1068,7 @@ mod tests {
             i64::make_entry(&-3_i64),
             Decimal::make_entry(&Decimal("-12342343.2348973".to_string())),
             f32::make_entry(&23434.389_f32),
-            Integer::make_entry(&int("239487329872343987")),
+            BigInt::make_entry(&int("239487329872343987")),
         ];
         vec.sort();
 

@@ -12,7 +12,6 @@
 
 use std::convert::TryInto;
 use std::io;
-use std::pin::Pin;
 
 use bytes::Bytes;
 use bytes::BytesMut;
@@ -22,9 +21,6 @@ use crate::storage::{FileLoad, FileStore, SyncableFile};
 use super::bitarray::*;
 use super::bitindex::*;
 use super::logarray::*;
-use futures::future;
-use futures::stream::{Stream, StreamExt, TryStreamExt};
-use futures::task::{Context, Poll};
 
 #[derive(Clone)]
 pub struct AdjacencyList {
@@ -181,60 +177,6 @@ impl Iterator for AdjacencyListIterator {
     }
 }
 
-pub struct AdjacencyBitCountStream<S: Stream<Item = io::Result<bool>> + Unpin> {
-    stream: S,
-    count: u64,
-}
-
-impl<S: Stream<Item = io::Result<bool>> + Unpin> AdjacencyBitCountStream<S> {
-    fn new(stream: S, offset: u64) -> Self {
-        AdjacencyBitCountStream {
-            stream,
-            count: offset,
-        }
-    }
-}
-
-impl<S: Stream<Item = io::Result<bool>> + Unpin> Stream for AdjacencyBitCountStream<S> {
-    type Item = io::Result<u64>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<io::Result<u64>>> {
-        let self_ = self.get_mut();
-        let next = Pin::new(&mut self_.stream).poll_next(cx);
-        next.map(|x| {
-            x.map(|x| {
-                x.map(|b| {
-                    let result = self_.count;
-
-                    if b {
-                        self_.count += 1;
-                    }
-
-                    result
-                })
-            })
-        })
-    }
-}
-
-pub async fn adjacency_list_stream_pairs<F: 'static + FileLoad>(
-    bits_file: F,
-    nums_file: F,
-) -> io::Result<impl Stream<Item = io::Result<(u64, u64)>> + Unpin + Send> {
-    Ok(
-        AdjacencyBitCountStream::new(bitarray_stream_bits(bits_file).await?, 1)
-            .zip(logarray_stream_entries(nums_file).await?)
-            .map(|(left, right)| {
-                let left = left?;
-                let right = right?;
-
-                Ok::<_, io::Error>((left, right))
-            })
-            .try_filter(|(_, right): &(u64, u64)| future::ready(*right != 0))
-            .into_stream(),
-    )
-}
-
 pub struct UnindexedAdjacencyListBufBuilder {
     bitarray: BitArrayBufBuilder<BytesMut>,
     nums: LogArrayBufBuilder<BytesMut>,
@@ -328,64 +270,45 @@ impl<W1: SyncableFile, W2: SyncableFile> UnindexedAdjacencyListBuilder<W1, W2> {
         }
     }
 
-    pub async fn push(&mut self, left: u64, right: u64) -> io::Result<()> {
-        // the tricky thing with this code is that the bitarray lags one entry behind the logarray.
-        // The reason for this is that at push time, we do not yet know if this entry is going to be
-        // the last entry for `left`, we only know this when we push a greater `left` later on.
+    pub fn push(&mut self, left: u64, right: u64) -> io::Result<()> {
         if left < self.last_left || (left == self.last_left && right <= self.last_right) {
             panic!("tried to push an unordered adjacent pair");
         }
-
-        // the left hand side of the adjacencylist is expected to be a continuous range from 1 up to the max
-        // but when adding entries, there may be holes. We handle holes by writing a '0' to the logarray
-        // (which is otherwise an invalid right-hand side) and pushing a 1 onto the bitarray to immediately close the segment.
         let skip = left - self.last_left;
-
         if self.last_left == 0 && skip == 1 {
-            // this is the first entry. we can't push a bit yet
         } else if skip == 0 {
-            // same `left` as before. so the previous entry was not the last one, and the bitarray gets a 0 appended.
-            self.bitarray.push(false).await?;
+            self.bitarray.push(false)?;
         } else {
-            // if this is the first element, but we do need to skip, make sure we write one less bit than we'd usually do
             let bitskip = if self.last_left == 0 { skip - 1 } else { skip };
-            // there's a different `left`. we push a bunch of 1s to the bitarray, and 0s to the num array.
             for _ in 0..bitskip {
-                self.bitarray.push(true).await?;
+                self.bitarray.push(true)?;
             }
             for _ in 0..(skip - 1) {
-                self.nums.push(0).await?;
+                self.nums.push(0)?;
             }
         }
-
-        // finally push right to the logarray
-        self.nums.push(right).await?;
+        self.nums.push(right)?;
         self.last_left = left;
         self.last_right = right;
-
         Ok(())
     }
 
-    pub async fn push_all<S: Stream<Item = io::Result<(u64, u64)>> + Unpin>(
+    pub fn push_all<I: Iterator<Item = (u64, u64)>>(
         &mut self,
-        mut stream: S,
+        iter: I,
     ) -> io::Result<()> {
-        while let Some((left, right)) = stream.try_next().await? {
-            self.push(left, right).await?;
+        for (left, right) in iter {
+            self.push(left, right)?;
         }
-
         Ok(())
     }
 
-    pub async fn finalize(mut self) -> io::Result<()> {
+    pub fn finalize(mut self) -> io::Result<()> {
         if self.nums.count() != 0 {
-            // push last bit to bitarray
-            self.bitarray.push(true).await?;
+            self.bitarray.push(true)?;
         }
-
-        self.bitarray.finalize().await?;
-        self.nums.finalize().await?;
-
+        self.bitarray.finalize()?;
+        self.nums.finalize()?;
         Ok(())
     }
 
@@ -467,7 +390,7 @@ where
     W2: 'static + SyncableFile,
     W3: 'static + SyncableFile,
 {
-    pub async fn new(
+    pub fn new(
         bitfile: F,
         bitindex_blocks: W1,
         bitindex_sblocks: W2,
@@ -476,7 +399,7 @@ where
     ) -> io::Result<AdjacencyListBuilder<F, W1, W2, W3>> {
         Ok(AdjacencyListBuilder {
             builder: UnindexedAdjacencyListBuilder::new(
-                bitfile.open_write().await?,
+                bitfile.open_write()?,
                 nums_writer,
                 width,
             ),
@@ -486,32 +409,31 @@ where
         })
     }
 
-    pub async fn push(&mut self, left: u64, right: u64) -> io::Result<()> {
-        self.builder.push(left, right).await
+    pub fn push(&mut self, left: u64, right: u64) -> io::Result<()> {
+        self.builder.push(left, right)
     }
 
-    pub async fn push_all<S: Stream<Item = io::Result<(u64, u64)>> + Unpin>(
+    pub fn push_all<I: Iterator<Item = (u64, u64)>>(
         &mut self,
-        stream: S,
+        iter: I,
     ) -> io::Result<()> {
-        self.builder.push_all(stream).await
+        self.builder.push_all(iter)
     }
 
-    pub async fn finalize(self) -> io::Result<()> {
+    pub fn finalize(self) -> io::Result<()> {
         let AdjacencyListBuilder {
             bitfile,
             builder,
             bitindex_blocks,
             bitindex_sblocks,
         } = self;
-        builder.finalize().await?;
+        builder.finalize()?;
 
         build_bitindex(
-            bitfile.open_read().await?,
+            &bitfile.map()?[..],
             bitindex_blocks,
             bitindex_sblocks,
-        )
-        .await?;
+        )?;
 
         Ok(())
     }
@@ -524,11 +446,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{storage::memory::MemoryBackedStore, util};
-    use futures::executor::block_on;
+    use crate::storage::memory::MemoryBackedStore;
 
-    #[tokio::test]
-    async fn can_build_and_parse_adjacencylist() {
+    fn build_adjacencylist(contents: Vec<(u64, u64)>) -> AdjacencyList {
         let bitfile = MemoryBackedStore::new();
         let bitindex_blocks_file = MemoryBackedStore::new();
         let bitindex_sblocks_file = MemoryBackedStore::new();
@@ -536,31 +456,27 @@ mod tests {
 
         let mut builder = AdjacencyListBuilder::new(
             bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
+            bitindex_blocks_file.open_write().unwrap(),
+            bitindex_sblocks_file.open_write().unwrap(),
+            nums_file.open_write().unwrap(),
             8,
         )
-        .await
         .unwrap();
 
-        builder
-            .push_all(util::stream_iter_ok(vec![(1, 1), (1, 3), (2, 5), (7, 4)]))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
+        builder.push_all(contents.into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-        let bitfile_contents = block_on(bitfile.map()).unwrap();
-        let bitindex_blocks_contents = block_on(bitindex_blocks_file.map()).unwrap();
-        let bitindex_sblocks_contents = block_on(bitindex_sblocks_file.map()).unwrap();
-        let nums_contents = block_on(nums_file.map()).unwrap();
+        AdjacencyList::parse(
+            nums_file.map().unwrap(),
+            bitfile.map().unwrap(),
+            bitindex_blocks_file.map().unwrap(),
+            bitindex_sblocks_file.map().unwrap(),
+        )
+    }
 
-        let adjacencylist = AdjacencyList::parse(
-            nums_contents,
-            bitfile_contents,
-            bitindex_blocks_contents,
-            bitindex_sblocks_contents,
-        );
+    #[test]
+    fn can_build_and_parse_adjacencylist() {
+        let adjacencylist = build_adjacencylist(vec![(1, 1), (1, 3), (2, 5), (7, 4)]);
 
         let slice = adjacencylist.get(1);
         assert_eq!(2, slice.len());
@@ -571,103 +487,22 @@ mod tests {
         assert_eq!(1, slice.len());
         assert_eq!(5, slice.entry(0));
 
-        let slice = adjacencylist.get(3);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
-        let slice = adjacencylist.get(4);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
-        let slice = adjacencylist.get(5);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
-        let slice = adjacencylist.get(6);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
         let slice = adjacencylist.get(7);
         assert_eq!(1, slice.len());
         assert_eq!(4, slice.entry(0));
     }
 
-    #[tokio::test]
-    async fn empty_adjacencylist() {
-        let bitfile = MemoryBackedStore::new();
-        let bitindex_blocks_file = MemoryBackedStore::new();
-        let bitindex_sblocks_file = MemoryBackedStore::new();
-        let nums_file = MemoryBackedStore::new();
-
-        let mut builder = AdjacencyListBuilder::new(
-            bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
-            8,
-        )
-        .await
-        .unwrap();
-
-        builder
-            .push_all(util::stream_iter_ok(Vec::new()))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
-
-        let bitfile_contents = block_on(bitfile.map()).unwrap();
-        let bitindex_blocks_contents = block_on(bitindex_blocks_file.map()).unwrap();
-        let bitindex_sblocks_contents = block_on(bitindex_sblocks_file.map()).unwrap();
-        let nums_contents = block_on(nums_file.map()).unwrap();
-        let adjacencylist = AdjacencyList::parse(
-            nums_contents,
-            bitfile_contents,
-            bitindex_blocks_contents,
-            bitindex_sblocks_contents,
-        );
-
+    #[test]
+    fn empty_adjacencylist() {
+        let adjacencylist = build_adjacencylist(Vec::new());
         assert_eq!(0, adjacencylist.left_count());
     }
 
-    #[tokio::test]
-    async fn adjacencylist_with_skip_at_start() {
-        let bitfile = MemoryBackedStore::new();
-        let bitindex_blocks_file = MemoryBackedStore::new();
-        let bitindex_sblocks_file = MemoryBackedStore::new();
-        let nums_file = MemoryBackedStore::new();
-
-        let mut builder = AdjacencyListBuilder::new(
-            bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
-            8,
-        )
-        .await
-        .unwrap();
-
-        builder
-            .push_all(util::stream_iter_ok(vec![(3, 2), (7, 4)]))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
-
-        let bitfile_contents = block_on(bitfile.map()).unwrap();
-        let bitindex_blocks_contents = block_on(bitindex_blocks_file.map()).unwrap();
-        let bitindex_sblocks_contents = block_on(bitindex_sblocks_file.map()).unwrap();
-        let nums_contents = block_on(nums_file.map()).unwrap();
-        let adjacencylist = AdjacencyList::parse(
-            nums_contents,
-            bitfile_contents,
-            bitindex_blocks_contents,
-            bitindex_sblocks_contents,
-        );
+    #[test]
+    fn adjacencylist_with_skip_at_start() {
+        let adjacencylist = build_adjacencylist(vec![(3, 2), (7, 4)]);
 
         let slice = adjacencylist.get(1);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
-        let slice = adjacencylist.get(2);
         assert_eq!(1, slice.len());
         assert_eq!(0, slice.entry(0));
 
@@ -675,146 +510,29 @@ mod tests {
         assert_eq!(1, slice.len());
         assert_eq!(2, slice.entry(0));
 
-        let slice = adjacencylist.get(4);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
-        let slice = adjacencylist.get(5);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
-        let slice = adjacencylist.get(6);
-        assert_eq!(1, slice.len());
-        assert_eq!(0, slice.entry(0));
-
         let slice = adjacencylist.get(7);
         assert_eq!(1, slice.len());
         assert_eq!(4, slice.entry(0));
     }
 
-    #[tokio::test]
-    async fn iterate_over_adjacency_list() {
-        let bitfile = MemoryBackedStore::new();
-        let bitindex_blocks_file = MemoryBackedStore::new();
-        let bitindex_sblocks_file = MemoryBackedStore::new();
-        let nums_file = MemoryBackedStore::new();
+    #[test]
+    fn iterate_over_adjacency_list() {
         let contents = vec![(1, 1), (1, 3), (2, 5), (7, 4)];
-
-        let mut builder = AdjacencyListBuilder::new(
-            bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
-            8,
-        )
-        .await
-        .unwrap();
-
-        builder
-            .push_all(util::stream_iter_ok(contents))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
-
-        let bitfile_contents = block_on(bitfile.map()).unwrap();
-        let bitindex_blocks_contents = block_on(bitindex_blocks_file.map()).unwrap();
-        let bitindex_sblocks_contents = block_on(bitindex_sblocks_file.map()).unwrap();
-        let nums_contents = block_on(nums_file.map()).unwrap();
-
-        let adjacencylist = AdjacencyList::parse(
-            nums_contents,
-            bitfile_contents,
-            bitindex_blocks_contents,
-            bitindex_sblocks_contents,
-        );
+        let adjacencylist = build_adjacencylist(contents.clone());
 
         assert_eq!(
-            vec![(1, 1), (1, 3), (2, 5), (7, 4)],
+            contents,
             adjacencylist.iter().collect::<Vec<_>>()
         );
     }
 
-    #[tokio::test]
-    async fn iterate_over_adjacency_list_files() {
-        let bitfile = MemoryBackedStore::new();
-        let bitindex_blocks_file = MemoryBackedStore::new();
-        let bitindex_sblocks_file = MemoryBackedStore::new();
-        let nums_file = MemoryBackedStore::new();
-        let contents = vec![(1, 1), (1, 3), (2, 5), (7, 4)];
-
-        let mut builder = AdjacencyListBuilder::new(
-            bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
-            8,
-        )
-        .await
-        .unwrap();
-
-        builder
-            .push_all(util::stream_iter_ok(contents.clone()))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
-
-        let result = adjacency_list_stream_pairs(bitfile, nums_file)
-            .await
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-
-        assert_eq!(result, contents);
-    }
-
-    #[tokio::test]
-    async fn pair_at_pos_starting_at_1_returns_correct_pair() {
-        let bitfile = MemoryBackedStore::new();
-        let bitindex_blocks_file = MemoryBackedStore::new();
-        let bitindex_sblocks_file = MemoryBackedStore::new();
-        let nums_file = MemoryBackedStore::new();
-
+    #[test]
+    fn pair_at_pos_starting_at_1_returns_correct_pair() {
         let contents = vec![
-            (1, 1),
-            (2, 3),
-            (2, 4),
-            (2, 6),
-            (3, 1),
-            (3, 3),
-            (3, 4),
-            (3, 8),
-            (7, 4),
-            (8, 12),
-            (11, 3),
+            (1, 1), (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
+            (7, 4), (8, 12), (11, 3),
         ];
-
-        let mut builder = AdjacencyListBuilder::new(
-            bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
-            8,
-        )
-        .await
-        .unwrap();
-
-        builder
-            .push_all(util::stream_iter_ok(contents.clone()))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
-
-        let bitfile_contents = block_on(bitfile.map()).unwrap();
-        let bitindex_blocks_contents = block_on(bitindex_blocks_file.map()).unwrap();
-        let bitindex_sblocks_contents = block_on(bitindex_sblocks_file.map()).unwrap();
-        let nums_contents = block_on(nums_file.map()).unwrap();
-        let adjacencylist = AdjacencyList::parse(
-            nums_contents,
-            bitfile_contents,
-            bitindex_blocks_contents,
-            bitindex_sblocks_contents,
-        );
+        let adjacencylist = build_adjacencylist(contents);
 
         let result: Vec<_> = (0..adjacencylist.right_count())
             .map(|i| adjacencylist.pair_at_pos(i as u64))
@@ -822,74 +540,20 @@ mod tests {
 
         assert_eq!(
             vec![
-                (1, 1),
-                (2, 3),
-                (2, 4),
-                (2, 6),
-                (3, 1),
-                (3, 3),
-                (3, 4),
-                (3, 8),
-                (4, 0),
-                (5, 0),
-                (6, 0),
-                (7, 4),
-                (8, 12),
-                (9, 0),
-                (10, 0),
-                (11, 3)
+                (1, 1), (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
+                (4, 0), (5, 0), (6, 0), (7, 4), (8, 12), (9, 0), (10, 0), (11, 3)
             ],
             result
         );
     }
 
-    #[tokio::test]
-    async fn pair_at_pos_with_skip_returns_correct_pair() {
-        let bitfile = MemoryBackedStore::new();
-        let bitindex_blocks_file = MemoryBackedStore::new();
-        let bitindex_sblocks_file = MemoryBackedStore::new();
-        let nums_file = MemoryBackedStore::new();
-
+    #[test]
+    fn pair_at_pos_with_skip_returns_correct_pair() {
         let contents = vec![
-            (2, 3),
-            (2, 4),
-            (2, 6),
-            (3, 1),
-            (3, 3),
-            (3, 4),
-            (3, 8),
-            (7, 4),
-            (8, 12),
-            (11, 3),
+            (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
+            (7, 4), (8, 12), (11, 3),
         ];
-
-        let mut builder = AdjacencyListBuilder::new(
-            bitfile.clone(),
-            bitindex_blocks_file.open_write().await.unwrap(),
-            bitindex_sblocks_file.open_write().await.unwrap(),
-            nums_file.open_write().await.unwrap(),
-            8,
-        )
-        .await
-        .unwrap();
-
-        builder
-            .push_all(util::stream_iter_ok(contents.clone()))
-            .await
-            .unwrap();
-        builder.finalize().await.unwrap();
-
-        let bitfile_contents = block_on(bitfile.map()).unwrap();
-        let bitindex_blocks_contents = block_on(bitindex_blocks_file.map()).unwrap();
-        let bitindex_sblocks_contents = block_on(bitindex_sblocks_file.map()).unwrap();
-        let nums_contents = block_on(nums_file.map()).unwrap();
-
-        let adjacencylist = AdjacencyList::parse(
-            nums_contents,
-            bitfile_contents,
-            bitindex_blocks_contents,
-            bitindex_sblocks_contents,
-        );
+        let adjacencylist = build_adjacencylist(contents);
 
         let result: Vec<_> = (0..adjacencylist.right_count())
             .map(|i| adjacencylist.pair_at_pos(i as u64))
@@ -897,22 +561,8 @@ mod tests {
 
         assert_eq!(
             vec![
-                (1, 0),
-                (2, 3),
-                (2, 4),
-                (2, 6),
-                (3, 1),
-                (3, 3),
-                (3, 4),
-                (3, 8),
-                (4, 0),
-                (5, 0),
-                (6, 0),
-                (7, 4),
-                (8, 12),
-                (9, 0),
-                (10, 0),
-                (11, 3)
+                (1, 0), (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
+                (4, 0), (5, 0), (6, 0), (7, 4), (8, 12), (9, 0), (10, 0), (11, 3)
             ],
             result
         );

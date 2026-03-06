@@ -54,10 +54,7 @@ use crate::storage::{FileLoad, SyncableFile};
 use super::util::{self, calculate_width};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::stream::{Stream, StreamExt};
 use std::{cmp::Ordering, convert::TryFrom, error, fmt, io};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::codec::{Decoder, FramedRead};
 
 use itertools::Itertools;
 
@@ -404,7 +401,7 @@ impl LogArray {
     }
 }
 
-/// write a logarray directly to an AsyncWrite
+/// write a logarray to a buffer
 pub struct LogArrayBufBuilder<B: BufMut> {
     /// Destination of the log array data
     buf: B,
@@ -465,7 +462,7 @@ impl<B: BufMut> LogArrayBufBuilder<B> {
         // Check if the new `offset` is larger than 64.
         if self.offset >= 64 {
             // We have filled `current`, so write it to the destination.
-            //util::write_u64(&mut self.file, self.current).await?;
+            //util::write_u64(&mut self.file, self.current)?;
             self.buf.put_u64(self.current);
             // Wrap the offset with the word size.
             self.offset -= 64;
@@ -590,7 +587,7 @@ impl<B: BufMut> LateLogArrayBufBuilder<B> {
     }
 }
 
-/// write a logarray directly to an AsyncWrite
+/// write a logarray directly to a SyncableFile
 pub struct LogArrayFileBuilder<W: SyncableFile> {
     /// Destination of the log array data
     file: W,
@@ -622,7 +619,7 @@ impl<W: SyncableFile> LogArrayFileBuilder<W> {
         self.count
     }
 
-    pub async fn push(&mut self, val: u64) -> io::Result<()> {
+    pub fn push(&mut self, val: u64) -> io::Result<()> {
         // This is the minimum number of leading zeros that a decoded value should have.
         let leading_zeros = 64 - self.width;
 
@@ -648,7 +645,7 @@ impl<W: SyncableFile> LogArrayFileBuilder<W> {
         // Check if the new `offset` is larger than 64.
         if self.offset >= 64 {
             // We have filled `current`, so write it to the destination.
-            util::write_u64(&mut self.file, self.current).await?;
+            util::write_u64(&mut self.file, self.current)?;
             // Wrap the offset with the word size.
             self.offset -= 64;
 
@@ -665,196 +662,56 @@ impl<W: SyncableFile> LogArrayFileBuilder<W> {
         Ok(())
     }
 
-    pub async fn push_vec(&mut self, vals: Vec<u64>) -> io::Result<()> {
+    pub fn push_vec(&mut self, vals: Vec<u64>) -> io::Result<()> {
         for val in vals {
-            self.push(val).await?;
+            self.push(val)?;
         }
 
         Ok(())
     }
 
-    pub async fn push_all<S: Stream<Item = io::Result<u64>> + Unpin>(
+    pub fn push_all<I: Iterator<Item = u64>>(
         &mut self,
-        mut vals: S,
+        vals: I,
     ) -> io::Result<()> {
-        while let Some(val) = vals.next().await {
-            self.push(val?).await?;
+        for val in vals {
+            self.push(val)?;
         }
 
         Ok(())
     }
 
-    async fn finalize_data(&mut self) -> io::Result<()> {
+    fn finalize_data(&mut self) -> io::Result<()> {
         if self.count * u64::from(self.width) & 0b11_1111 != 0 {
-            util::write_u64(&mut self.file, self.current).await?;
+            util::write_u64(&mut self.file, self.current)?;
         }
 
         Ok(())
     }
 
-    pub async fn finalize(mut self) -> io::Result<()> {
+    pub fn finalize(mut self) -> io::Result<()> {
         let len = self.count;
         let width = self.width;
 
         // Write the final data word.
-        self.finalize_data().await?;
+        self.finalize_data()?;
 
         // Write the control word.
         let buf = control_word(len, width);
-        self.file.write_all(&buf).await?;
+        self.file.write_all(&buf)?;
 
-        self.file.flush().await?;
-        self.file.sync_all().await?;
+        self.file.flush()?;
+        self.file.sync_all()?;
 
         Ok(())
     }
 }
 
-struct LogArrayDecoder {
-    /// Storage for the most recent word read from the buffer
-    current: u64,
-    /// Bit width of an element
-    width: u8,
-    /// Bit offset from the msb of `current` to the msb of the encoded element
-    offset: u8,
-    /// Number of elements remaining to decode
-    remaining: u64,
-}
-
-impl fmt::Debug for LogArrayDecoder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LogArrayDecoder {{ current: ")?;
-        write!(f, "{:#066b}", self.current)?;
-        write!(f, ", width: ")?;
-        write!(f, "{:?}", self.width)?;
-        write!(f, ", offset: ")?;
-        write!(f, "{:?}", self.offset)?;
-        write!(f, ", remaining: ")?;
-        write!(f, "{:?}", self.remaining)?;
-        write!(f, " }}")
-    }
-}
-
-impl LogArrayDecoder {
-    /// Construct a new `LogArrayDecoder`.
-    ///
-    /// This function does not validate the parameters. Validation of `width` and `remaining` must
-    /// be done before calling this function.
-    fn new_unchecked(width: u8, remaining: u64) -> Self {
-        LogArrayDecoder {
-            // The initial value of `current` is ignored by `decode()` because `offset` is 64.
-            current: 0,
-            // The initial value of `offset` is interpreted in `decode()` to begin reading a new
-            // word and ignore the initial value of `current`.
-            offset: 64,
-            width,
-            remaining,
-        }
-    }
-}
-
-impl Decoder for LogArrayDecoder {
-    type Item = u64;
-    type Error = io::Error;
-
-    /// Decode the next element of the log array.
-    fn decode(&mut self, bytes: &mut BytesMut) -> Result<Option<u64>, io::Error> {
-        // If we have no elements remaining to decode, clean up and exit.
-        if self.remaining == 0 {
-            bytes.clear();
-            return Ok(None);
-        }
-
-        // At this point, we have at least one element to decode.
-
-        // Declare some immutable working values. After this, `self.<field>` only appears on the
-        // lhs of `=`.
-        let first_word = self.current;
-        let offset = self.offset;
-        let width = self.width;
-
-        // This is the minimum number of leading zeros that a decoded value should have.
-        let leading_zeros = 64 - width;
-
-        // If the next element fits completely in `first_word`, we can return it immediately.
-        if offset + width <= 64 {
-            // Increment to the msb of the next element.
-            self.offset += width;
-            // Decrement since we're returning a decoded element.
-            self.remaining -= 1;
-            // Decode by introducing leading zeros and shifting all the way to the right.
-            return Ok(Some(first_word << offset >> leading_zeros));
-        }
-
-        // At this point, we need to read another word because we do not have enough bits in
-        // `first_word` to decode.
-
-        // If there isn't a full word available in the buffer, stop until there is.
-        if bytes.len() < 8 {
-            return Ok(None);
-        }
-
-        // Load the `second_word` and advance `bytes` by 1 word.
-        let second_word = BigEndian::read_u64(&bytes.split_to(8));
-        self.current = second_word;
-
-        // Decrement to indicate we will return another decoded element.
-        self.remaining -= 1;
-
-        // If the `offset` is 64, it means that the element is completely included in the
-        // `second_word`.
-        if offset == 64 {
-            // Increment the `offset` to the msb of the next element.
-            self.offset = width;
-
-            // Decode by shifting all the way to the right. Since the msb of `second_word` and the
-            // encoded value are the same, this naturally introduces leading zeros.
-            return Ok(Some(second_word >> leading_zeros));
-        }
-
-        // At this point, we have an element split over `first_word` and `second_word`. The bottom
-        // bits of `first_word` become the upper bits of the decoded value, and the top bits of
-        // `second_word` become the lower bits of the decoded value.
-
-        // These are the bit widths of the important parts in `first_word` and `second_word`.
-        let first_width = 64 - offset;
-        let second_width = width - first_width;
-
-        // These are the parts of the element with the unimportant parts removed.
-
-        // Introduce leading zeros and trailing zeros where the `second_part` will go.
-        let first_part = first_word << offset >> offset << second_width;
-
-        // Introduce leading zeros where the `first_part` will go.
-        let second_part = second_word >> 64 - second_width;
-
-        // Increment the `offset` to the msb of the next element.
-        self.offset = second_width;
-
-        // Decode by combining the first and second parts.
-        Ok(Some(first_part | second_part))
-    }
-}
-
-pub async fn logarray_file_get_length_and_width<F: FileLoad>(f: F) -> io::Result<(u64, u8)> {
-    LogArrayError::validate_input_buf_size(f.size().await?)?;
-
-    let mut buf = [0; 8];
-    f.open_read_from(f.size().await? - 8)
-        .await?
-        .read_exact(&mut buf)
-        .await?;
-    Ok(read_control_word(&buf, f.size().await?)?)
-}
-
-pub async fn logarray_stream_entries<F: 'static + FileLoad>(
-    f: F,
-) -> io::Result<impl Stream<Item = io::Result<u64>> + Unpin + Send> {
-    let (len, width) = logarray_file_get_length_and_width(f.clone()).await?;
-    Ok(FramedRead::new(
-        f.open_read().await?,
-        LogArrayDecoder::new_unchecked(width, len),
-    ))
+pub fn logarray_file_get_length_and_width<F: FileLoad>(f: &F) -> io::Result<(u64, u8)> {
+    let size = f.size()?;
+    LogArrayError::validate_input_buf_size(size)?;
+    let mapped = f.map()?;
+    Ok(read_control_word(&mapped[size - 8..], size)?)
 }
 
 #[derive(Clone)]
@@ -964,13 +821,9 @@ mod tests {
     use super::*;
     use crate::storage::memory::MemoryBackedStore;
     use crate::storage::FileStore;
-    use crate::util::stream_iter_ok;
-    use futures::executor::block_on;
-    use futures::stream::TryStreamExt;
 
     #[test]
     fn log_array_error() {
-        // Display
         assert_eq!(
             "expected input buffer size (7) >= 8",
             LogArrayError::InputBufferTooSmall(7).to_string()
@@ -983,8 +836,6 @@ mod tests {
             "expected input buffer size (9) to be 8 for 0 elements and width 17",
             LogArrayError::UnexpectedInputBufferSize(9, 8, 0, 17).to_string()
         );
-
-        // From<LogArrayError> for io::Error
         assert_eq!(
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1009,31 +860,20 @@ mod tests {
     fn validate_len_and_width() {
         let val =
             |buf_size, len, width| LogArrayError::validate_len_and_width(buf_size, len, width);
-
         let err = |width| Err(LogArrayError::WidthTooLarge(width));
-
-        // width: 65
         assert_eq!(err(65), val(0, 0, 65));
-
         let err = |buf_size, expected, len, width| {
             Err(LogArrayError::UnexpectedInputBufferSize(
                 buf_size, expected, len, width,
             ))
         };
-
-        // width: 0
         assert_eq!(err(0, 8, 0, 0), val(0, 0, 0));
-
-        // width: 1
         assert_eq!(Ok(()), val(8, 0, 1));
         assert_eq!(err(9, 8, 0, 1), val(9, 0, 1));
         assert_eq!(Ok(()), val(16, 1, 1));
-
-        // width: 64
         assert_eq!(Ok(()), val(16, 1, 64));
         assert_eq!(err(16, 24, 2, 64), val(16, 2, 64));
         assert_eq!(err(24, 16, 1, 64), val(24, 1, 64));
-
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             Ok(()),
@@ -1043,8 +883,6 @@ mod tests {
                 64
             )
         );
-
-        // width: 5
         assert_eq!(err(16, 24, 13, 5), val(16, 13, 5));
         assert_eq!(Ok(()), val(24, 13, 5));
     }
@@ -1066,30 +904,22 @@ mod tests {
         assert_eq!(logarray.entry(0_usize), 0_u64);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic(expected = "expected value (8) to fit in 3 bits")]
-    async fn log_array_file_builder_panic() {
+    fn log_array_file_builder_panic() {
         let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 3);
-        block_on(builder.push(8)).unwrap();
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 3);
+        builder.push(8).unwrap();
     }
 
-    #[tokio::test]
-    async fn generate_then_parse_works() {
+    #[test]
+    fn generate_then_parse_works() {
         let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 5);
-        block_on(async {
-            builder
-                .push_all(stream_iter_ok(vec![1, 3, 2, 5, 12, 31, 18]))
-                .await?;
-            builder.finalize().await?;
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 5);
+        builder.push_all(vec![1, 3, 2, 5, 12, 31, 18].into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
-
-        let content = block_on(store.map()).unwrap();
-
+        let content = store.map().unwrap();
         let logarray = LogArray::parse(content).unwrap();
 
         assert_eq!(1, logarray.entry(0));
@@ -1102,26 +932,10 @@ mod tests {
     }
 
     const TEST0_DATA: [u8; 8] = [
-        0b00000000,
-        0b00000000,
-        0b1_0000000,
-        0b00000000,
-        0b10_000000,
-        0b00000000,
-        0b011_00000,
-        0b00000000,
+        0b00000000, 0b00000000, 0b1_0000000, 0b00000000,
+        0b10_000000, 0b00000000, 0b011_00000, 0b00000000,
     ];
     const TEST0_CONTROL: [u8; 8] = [0, 0, 0, 3, 17, 0, 0, 0];
-    const TEST1_DATA: [u8; 8] = [
-        0b0100_0000,
-        0b00000000,
-        0b00101_000,
-        0b00000000,
-        0b000110_00,
-        0b00000000,
-        0b0000111_0,
-        0b00000000,
-    ];
 
     fn test0_logarray() -> LogArray {
         let mut content = Vec::new();
@@ -1164,175 +978,93 @@ mod tests {
     }
 
     #[test]
-    fn decode() {
-        let mut decoder = LogArrayDecoder::new_unchecked(17, 1);
-        let mut bytes = BytesMut::from(TEST0_DATA.as_ref());
-        assert_eq!(Some(1), Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        assert_eq!(None, Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        decoder = LogArrayDecoder::new_unchecked(17, 4);
-        bytes = BytesMut::from(TEST0_DATA.as_ref());
-        assert_eq!(Some(1), Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        assert_eq!(
-            "LogArrayDecoder { current: \
-             0b0000000000000000100000000000000010000000000000000110000000000000, width: 17, \
-             offset: 17, remaining: 3 }",
-            format!("{:?}", decoder)
-        );
-        assert_eq!(Some(2), Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        assert_eq!(Some(3), Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        assert_eq!(None, Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        bytes.extend(TEST1_DATA.iter());
-        assert_eq!(Some(4), Decoder::decode(&mut decoder, &mut bytes).unwrap());
-        assert_eq!(None, Decoder::decode(&mut decoder, &mut bytes).unwrap());
-    }
-
-    #[tokio::test]
-    async fn logarray_file_get_length_and_width_errors() {
+    fn logarray_file_get_length_and_width_errors() {
+        use std::io::Write;
         let store = MemoryBackedStore::new();
-        let mut writer = store.open_write().await.unwrap();
-        writer.write_all(&[0, 0, 0]).await.unwrap();
-        writer.sync_all().await.unwrap();
+        let mut writer = store.open_write().unwrap();
+        writer.write_all(&[0, 0, 0]).unwrap();
+        writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(LogArrayError::InputBufferTooSmall(3)).to_string(),
-            block_on(logarray_file_get_length_and_width(store))
-                .err()
-                .unwrap()
-                .to_string()
+            logarray_file_get_length_and_width(&store).err().unwrap().to_string()
         );
 
         let store = MemoryBackedStore::new();
-        let mut writer = store.open_write().await.unwrap();
-        writer.write_all(&[0, 0, 0, 0, 65, 0, 0, 0]).await.unwrap();
-        writer.sync_all().await.unwrap();
+        let mut writer = store.open_write().unwrap();
+        writer.write_all(&[0, 0, 0, 0, 65, 0, 0, 0]).unwrap();
+        writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(LogArrayError::WidthTooLarge(65)).to_string(),
-            block_on(logarray_file_get_length_and_width(store))
-                .err()
-                .unwrap()
-                .to_string()
+            logarray_file_get_length_and_width(&store).err().unwrap().to_string()
         );
 
         let store = MemoryBackedStore::new();
-        let mut writer = store.open_write().await.unwrap();
-        writer.write_all(&[0, 0, 0, 1, 17, 0, 0, 0]).await.unwrap();
-        writer.sync_all().await.unwrap();
+        let mut writer = store.open_write().unwrap();
+        writer.write_all(&[0, 0, 0, 1, 17, 0, 0, 0]).unwrap();
+        writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(LogArrayError::UnexpectedInputBufferSize(8, 16, 1, 17)).to_string(),
-            block_on(logarray_file_get_length_and_width(store))
-                .err()
-                .unwrap()
-                .to_string()
+            logarray_file_get_length_and_width(&store).err().unwrap().to_string()
         );
     }
 
-    #[tokio::test]
-    async fn generate_then_stream_works() {
+    #[test]
+    fn iterate_over_logarray() {
         let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 5);
-        block_on(async {
-            builder.push_all(stream_iter_ok(0..31)).await?;
-            builder.finalize().await?;
-
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
-
-        let entries: Vec<u64> = block_on(
-            logarray_stream_entries(store)
-                .await
-                .unwrap()
-                .try_collect::<Vec<u64>>(),
-        )
-        .unwrap();
-        let expected: Vec<u64> = (0..31).collect();
-        assert_eq!(expected, entries);
-    }
-
-    #[tokio::test]
-    async fn iterate_over_logarray() {
-        let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 5);
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 5);
         let original = vec![1, 3, 2, 5, 12, 31, 18];
-        block_on(async {
-            builder.push_all(stream_iter_ok(original.clone())).await?;
-            builder.finalize().await?;
+        builder.push_all(original.clone().into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
-
-        let content = block_on(store.map()).unwrap();
-
+        let content = store.map().unwrap();
         let logarray = LogArray::parse(content).unwrap();
-
         let result: Vec<u64> = logarray.iter().collect();
-
         assert_eq!(original, result);
     }
 
-    #[tokio::test]
-    async fn iterate_over_logarray_slice() {
+    #[test]
+    fn iterate_over_logarray_slice() {
         let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 5);
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 5);
         let original: Vec<u64> = vec![1, 3, 2, 5, 12, 31, 18];
-        block_on(async {
-            builder.push_all(stream_iter_ok(original)).await?;
-            builder.finalize().await?;
+        builder.push_all(original.into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
-
-        let content = block_on(store.map()).unwrap();
-
+        let content = store.map().unwrap();
         let logarray = LogArray::parse(content).unwrap();
         let slice = logarray.slice(2, 3);
-
         let result: Vec<u64> = slice.iter().collect();
-
         assert_eq!([2, 5, 12], result.as_ref());
     }
 
-    #[tokio::test]
-    async fn monotonic_logarray_index_lookup() {
+    #[test]
+    fn monotonic_logarray_index_lookup() {
         let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 5);
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 5);
         let original = vec![1, 3, 5, 6, 7, 10, 11, 15, 16, 18, 20, 25, 31];
-        block_on(async {
-            builder.push_all(stream_iter_ok(original.clone())).await?;
-            builder.finalize().await?;
+        builder.push_all(original.clone().into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
-
-        let content = block_on(store.map()).unwrap();
-
+        let content = store.map().unwrap();
         let logarray = LogArray::parse(content).unwrap();
         let monotonic = MonotonicLogArray::from_logarray(logarray);
 
         for (i, &val) in original.iter().enumerate() {
             assert_eq!(i, monotonic.index_of(val).unwrap());
         }
-
         assert_eq!(None, monotonic.index_of(12));
         assert_eq!(original.len(), monotonic.len());
     }
 
-    #[tokio::test]
-    async fn monotonic_logarray_near_index_lookup() {
+    #[test]
+    fn monotonic_logarray_near_index_lookup() {
         let store = MemoryBackedStore::new();
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 5);
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 5);
         let original = vec![3, 5, 6, 7, 10, 11, 15, 16, 18, 20, 25, 31];
-        block_on(async {
-            builder.push_all(stream_iter_ok(original.clone())).await?;
-            builder.finalize().await?;
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
+        builder.push_all(original.clone().into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-        let content = block_on(store.map()).unwrap();
-
+        let content = store.map().unwrap();
         let logarray = LogArray::parse(content).unwrap();
         let monotonic = MonotonicLogArray::from_logarray(logarray);
 
@@ -1348,20 +1080,15 @@ mod tests {
         assert_eq!(expected, nearest);
     }
 
-    #[tokio::test]
-    async fn writing_64_bits_of_data() {
+    #[test]
+    fn writing_64_bits_of_data() {
         let store = MemoryBackedStore::new();
         let original = vec![1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8];
-        let mut builder = LogArrayFileBuilder::new(store.open_write().await.unwrap(), 4);
-        block_on(async {
-            builder.push_all(stream_iter_ok(original.clone())).await?;
-            builder.finalize().await?;
+        let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 4);
+        builder.push_all(original.clone().into_iter()).unwrap();
+        builder.finalize().unwrap();
 
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
-
-        let content = block_on(store.map()).unwrap();
+        let content = store.map().unwrap();
         let logarray = LogArray::parse(content).unwrap();
         assert_eq!(original, logarray.iter().collect::<Vec<_>>());
         assert_eq!(16, logarray.len());
@@ -1380,3 +1107,4 @@ mod tests {
         assert_eq!(width, out_width);
     }
 }
+

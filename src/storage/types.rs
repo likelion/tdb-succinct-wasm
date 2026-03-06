@@ -1,37 +1,33 @@
-use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
+use std::io::{self, Read, Write};
 
 use crate::{AdjacencyList, BitIndex};
 
-#[async_trait]
-pub trait SyncableFile: AsyncWrite + Unpin + Send {
-    async fn sync_all(self) -> io::Result<()>;
+pub trait SyncableFile: Write {
+    fn sync_all(&mut self) -> io::Result<()>;
 }
 
-#[async_trait]
 pub trait FileStore: Clone + Send + Sync {
     type Write: SyncableFile;
-    async fn open_write(&self) -> io::Result<Self::Write>;
+    fn open_write(&self) -> io::Result<Self::Write>;
 }
 
-#[async_trait]
 pub trait FileLoad: Clone + Send + Sync {
-    type Read: AsyncRead + Unpin + Send;
+    type Read: Read + Send;
 
-    async fn exists(&self) -> io::Result<bool>;
-    async fn size(&self) -> io::Result<usize>;
-    async fn open_read(&self) -> io::Result<Self::Read> {
-        self.open_read_from(0).await
+    fn exists(&self) -> io::Result<bool>;
+    fn size(&self) -> io::Result<usize>;
+    fn open_read(&self) -> io::Result<Self::Read> {
+        self.open_read_from(0)
     }
-    async fn open_read_from(&self, offset: usize) -> io::Result<Self::Read>;
-    async fn map(&self) -> io::Result<Bytes>;
+    fn open_read_from(&self, offset: usize) -> io::Result<Self::Read>;
+    fn map(&self) -> io::Result<Bytes>;
 
-    async fn map_if_exists(&self) -> io::Result<Option<Bytes>> {
-        match self.exists().await? {
+    fn map_if_exists(&self) -> io::Result<Option<Bytes>> {
+        match self.exists()? {
             false => Ok(None),
             true => {
-                let mapped = self.map().await?;
+                let mapped = self.map()?;
                 Ok(Some(mapped))
             }
         }
@@ -55,11 +51,11 @@ pub struct TypedDictionaryFiles<F: 'static + FileLoad + FileStore> {
 }
 
 impl<F: 'static + FileLoad + FileStore> TypedDictionaryFiles<F> {
-    pub async fn map_all(&self) -> io::Result<TypedDictionaryMaps> {
-        let types_present_map = self.types_present_file.map().await?;
-        let type_offsets_map = self.type_offsets_file.map().await?;
-        let offsets_map = self.offsets_file.map().await?;
-        let blocks_map = self.blocks_file.map().await?;
+    pub fn map_all(&self) -> io::Result<TypedDictionaryMaps> {
+        let types_present_map = self.types_present_file.map()?;
+        let type_offsets_map = self.type_offsets_file.map()?;
+        let offsets_map = self.offsets_file.map()?;
+        let blocks_map = self.blocks_file.map()?;
 
         Ok(TypedDictionaryMaps {
             types_present_map,
@@ -69,39 +65,48 @@ impl<F: 'static + FileLoad + FileStore> TypedDictionaryFiles<F> {
         })
     }
 
-    pub async fn write_all_from_bufs<B1: Buf, B2: Buf, B3: Buf, B4: Buf>(
+    pub fn write_all_from_bufs<B1: Buf, B2: Buf, B3: Buf, B4: Buf>(
         &self,
         types_present_buf: &mut B1,
         type_offsets_buf: &mut B2,
         offsets_buf: &mut B3,
         blocks_buf: &mut B4,
     ) -> io::Result<()> {
-        let mut types_present_writer = self.types_present_file.open_write().await?;
-        let mut type_offsets_writer = self.type_offsets_file.open_write().await?;
-        let mut offsets_writer = self.offsets_file.open_write().await?;
-        let mut blocks_writer = self.blocks_file.open_write().await?;
+        let mut types_present_writer = self.types_present_file.open_write()?;
+        let mut type_offsets_writer = self.type_offsets_file.open_write()?;
+        let mut offsets_writer = self.offsets_file.open_write()?;
+        let mut blocks_writer = self.blocks_file.open_write()?;
 
-        types_present_writer
-            .write_all_buf(types_present_buf)
-            .await?;
-        type_offsets_writer.write_all_buf(type_offsets_buf).await?;
-        offsets_writer.write_all_buf(offsets_buf).await?;
-        blocks_writer.write_all_buf(blocks_buf).await?;
+        write_buf(&mut types_present_writer, types_present_buf)?;
+        write_buf(&mut type_offsets_writer, type_offsets_buf)?;
+        write_buf(&mut offsets_writer, offsets_buf)?;
+        write_buf(&mut blocks_writer, blocks_buf)?;
 
-        types_present_writer.flush().await?;
-        types_present_writer.sync_all().await?;
+        types_present_writer.flush()?;
+        types_present_writer.sync_all()?;
 
-        type_offsets_writer.flush().await?;
-        type_offsets_writer.sync_all().await?;
+        type_offsets_writer.flush()?;
+        type_offsets_writer.sync_all()?;
 
-        offsets_writer.flush().await?;
-        offsets_writer.sync_all().await?;
+        offsets_writer.flush()?;
+        offsets_writer.sync_all()?;
 
-        blocks_writer.flush().await?;
-        blocks_writer.sync_all().await?;
+        blocks_writer.flush()?;
+        blocks_writer.sync_all()?;
 
         Ok(())
     }
+}
+
+/// Helper to write all remaining bytes from a Buf into a Write.
+fn write_buf<W: Write, B: Buf>(writer: &mut W, buf: &mut B) -> io::Result<()> {
+    while buf.has_remaining() {
+        let chunk = buf.chunk();
+        writer.write_all(chunk)?;
+        let len = chunk.len();
+        buf.advance(len);
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -114,13 +119,12 @@ pub struct DictionaryMaps {
 pub struct DictionaryFiles<F: 'static + FileLoad + FileStore> {
     pub blocks_file: F,
     pub offsets_file: F,
-    //    pub map_files: Option<BitIndexFiles<F>>
 }
 
 impl<F: 'static + FileLoad + FileStore> DictionaryFiles<F> {
-    pub async fn map_all(&self) -> io::Result<DictionaryMaps> {
-        let offsets_map = self.offsets_file.map().await?;
-        let blocks_map = self.blocks_file.map().await?;
+    pub fn map_all(&self) -> io::Result<DictionaryMaps> {
+        let offsets_map = self.offsets_file.map()?;
+        let blocks_map = self.blocks_file.map()?;
 
         Ok(DictionaryMaps {
             offsets_map,
@@ -128,22 +132,22 @@ impl<F: 'static + FileLoad + FileStore> DictionaryFiles<F> {
         })
     }
 
-    pub async fn write_all_from_bufs<B1: Buf, B2: Buf>(
+    pub fn write_all_from_bufs<B1: Buf, B2: Buf>(
         &self,
         blocks_buf: &mut B1,
         offsets_buf: &mut B2,
     ) -> io::Result<()> {
-        let mut offsets_writer = self.offsets_file.open_write().await?;
-        let mut blocks_writer = self.blocks_file.open_write().await?;
+        let mut offsets_writer = self.offsets_file.open_write()?;
+        let mut blocks_writer = self.blocks_file.open_write()?;
 
-        offsets_writer.write_all_buf(offsets_buf).await?;
-        blocks_writer.write_all_buf(blocks_buf).await?;
+        write_buf(&mut offsets_writer, offsets_buf)?;
+        write_buf(&mut blocks_writer, blocks_buf)?;
 
-        offsets_writer.flush().await?;
-        offsets_writer.sync_all().await?;
+        offsets_writer.flush()?;
+        offsets_writer.sync_all()?;
 
-        blocks_writer.flush().await?;
-        blocks_writer.sync_all().await?;
+        blocks_writer.flush()?;
+        blocks_writer.sync_all()?;
 
         Ok(())
     }
@@ -170,10 +174,10 @@ pub struct BitIndexFiles<F: 'static + FileLoad> {
 }
 
 impl<F: 'static + FileLoad + FileStore> BitIndexFiles<F> {
-    pub async fn map_all(&self) -> io::Result<BitIndexMaps> {
-        let bits_map = self.bits_file.map().await?;
-        let blocks_map = self.blocks_file.map().await?;
-        let sblocks_map = self.sblocks_file.map().await?;
+    pub fn map_all(&self) -> io::Result<BitIndexMaps> {
+        let bits_map = self.bits_file.map()?;
+        let blocks_map = self.blocks_file.map()?;
+        let sblocks_map = self.sblocks_file.map()?;
 
         Ok(BitIndexMaps {
             bits_map,
@@ -182,9 +186,9 @@ impl<F: 'static + FileLoad + FileStore> BitIndexFiles<F> {
         })
     }
 
-    pub async fn map_all_if_exists(&self) -> io::Result<Option<BitIndexMaps>> {
-        if self.bits_file.exists().await? {
-            Ok(Some(self.map_all().await?))
+    pub fn map_all_if_exists(&self) -> io::Result<Option<BitIndexMaps>> {
+        if self.bits_file.exists()? {
+            Ok(Some(self.map_all()?))
         } else {
             Ok(None)
         }
@@ -215,9 +219,9 @@ pub struct AdjacencyListFiles<F: 'static + FileLoad> {
 }
 
 impl<F: 'static + FileLoad + FileStore> AdjacencyListFiles<F> {
-    pub async fn map_all(&self) -> io::Result<AdjacencyListMaps> {
-        let bitindex_maps = self.bitindex_files.map_all().await?;
-        let nums_map = self.nums_file.map().await?;
+    pub fn map_all(&self) -> io::Result<AdjacencyListMaps> {
+        let bitindex_maps = self.bitindex_files.map_all()?;
+        let nums_map = self.nums_file.map()?;
 
         Ok(AdjacencyListMaps {
             bitindex_maps,
@@ -226,65 +230,66 @@ impl<F: 'static + FileLoad + FileStore> AdjacencyListFiles<F> {
     }
 }
 
-pub async fn copy_file<F1: FileLoad, F2: FileStore>(f1: &F1, f2: &F2) -> io::Result<()> {
-    if !f1.exists().await? {
+pub fn copy_file<F1: FileLoad, F2: FileStore>(f1: &F1, f2: &F2) -> io::Result<()> {
+    if !f1.exists()? {
         return Ok(());
     }
-    let mut input = f1.open_read().await?;
-    let mut output = f2.open_write().await?;
+    let mut input = f1.open_read()?;
+    let mut output = f2.open_write()?;
 
-    tokio::io::copy(&mut input, &mut output).await?;
-    output.flush().await?;
-    output.sync_all().await?;
+    std::io::copy(&mut input, &mut output)?;
+    output.flush()?;
+    output.sync_all()?;
 
     Ok(())
 }
 
 impl<F1: 'static + FileLoad + FileStore> DictionaryFiles<F1> {
-    pub async fn copy_from<F2: 'static + FileLoad + FileStore>(
+    pub fn copy_from<F2: 'static + FileLoad + FileStore>(
         &self,
         from: &DictionaryFiles<F2>,
     ) -> io::Result<()> {
-        copy_file(&from.blocks_file, &self.blocks_file).await?;
-        copy_file(&from.offsets_file, &self.offsets_file).await?;
+        copy_file(&from.blocks_file, &self.blocks_file)?;
+        copy_file(&from.offsets_file, &self.offsets_file)?;
 
         Ok(())
     }
 }
 
 impl<F1: 'static + FileLoad + FileStore> TypedDictionaryFiles<F1> {
-    pub async fn copy_from<F2: 'static + FileLoad + FileStore>(
+    pub fn copy_from<F2: 'static + FileLoad + FileStore>(
         &self,
         from: &TypedDictionaryFiles<F2>,
     ) -> io::Result<()> {
-        copy_file(&from.types_present_file, &self.types_present_file).await?;
-        copy_file(&from.type_offsets_file, &self.type_offsets_file).await?;
-        copy_file(&from.blocks_file, &self.blocks_file).await?;
-        copy_file(&from.offsets_file, &self.offsets_file).await?;
+        copy_file(&from.types_present_file, &self.types_present_file)?;
+        copy_file(&from.type_offsets_file, &self.type_offsets_file)?;
+        copy_file(&from.blocks_file, &self.blocks_file)?;
+        copy_file(&from.offsets_file, &self.offsets_file)?;
 
         Ok(())
     }
 }
 
 impl<F1: 'static + FileLoad + FileStore> BitIndexFiles<F1> {
-    pub async fn copy_from<F2: 'static + FileLoad + FileStore>(
+    pub fn copy_from<F2: 'static + FileLoad + FileStore>(
         &self,
         from: &BitIndexFiles<F2>,
     ) -> io::Result<()> {
-        copy_file(&from.bits_file, &self.bits_file).await?;
-        copy_file(&from.blocks_file, &self.blocks_file).await?;
-        copy_file(&from.sblocks_file, &self.sblocks_file).await?;
+        copy_file(&from.bits_file, &self.bits_file)?;
+        copy_file(&from.blocks_file, &self.blocks_file)?;
+        copy_file(&from.sblocks_file, &self.sblocks_file)?;
 
         Ok(())
     }
 }
+
 impl<F1: 'static + FileLoad + FileStore> AdjacencyListFiles<F1> {
-    pub async fn copy_from<F2: 'static + FileLoad + FileStore>(
+    pub fn copy_from<F2: 'static + FileLoad + FileStore>(
         &self,
         from: &AdjacencyListFiles<F2>,
     ) -> io::Result<()> {
-        copy_file(&from.nums_file, &self.nums_file).await?;
-        self.bitindex_files.copy_from(&from.bitindex_files).await?;
+        copy_file(&from.nums_file, &self.nums_file)?;
+        self.bitindex_files.copy_from(&from.bitindex_files)?;
 
         Ok(())
     }

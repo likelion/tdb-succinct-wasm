@@ -9,7 +9,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use chrono::{NaiveDateTime, NaiveTime};
 use num_derive::FromPrimitive;
-use rug::Integer;
+use num_bigint::BigInt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, FromPrimitive, Hash)]
 pub enum Datatype {
@@ -418,26 +418,26 @@ impl ToLexical<f64> for f64 {
     }
 }
 
-impl TdbDataType for Integer {
+impl TdbDataType for BigInt {
     fn datatype() -> Datatype {
         Datatype::BigInt
     }
 }
 
-impl FromLexical<Integer> for Integer {
+impl FromLexical<BigInt> for BigInt {
     fn from_lexical<B: Buf>(mut b: B) -> Self {
         storage_to_bigint(&mut b)
     }
 }
 
-impl FromLexical<Integer> for String {
+impl FromLexical<BigInt> for String {
     fn from_lexical<B: Buf>(mut b: B) -> Self {
         // TODO make this better
         storage_to_bigint(&mut b).to_string()
     }
 }
 
-impl ToLexical<Integer> for Integer {
+impl ToLexical<BigInt> for BigInt {
     fn to_lexical(&self) -> Bytes {
         Bytes::from(bigint_to_storage(self.clone()))
     }
@@ -1090,7 +1090,7 @@ macro_rules! biginty_type {
     };
     ($ty:ident, $datatype:ident) => {
         #[derive(PartialEq, Debug)]
-        pub struct $ty(pub Integer);
+        pub struct $ty(pub BigInt);
 
         impl TdbDataType for $ty {
             fn datatype() -> Datatype {
@@ -1110,7 +1110,7 @@ macro_rules! biginty_type {
             }
         }
 
-        impl FromLexical<$ty> for Integer {
+        impl FromLexical<$ty> for BigInt {
             fn from_lexical<B: Buf>(mut b: B) -> Self {
                 storage_to_bigint(&mut b)
             }

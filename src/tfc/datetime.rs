@@ -1,16 +1,17 @@
 use bytes::Buf;
-use chrono::NaiveDateTime;
-use rug::Integer;
+use chrono::{DateTime, NaiveDateTime};
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 
 use super::{
     decimal::{decode_fraction, integer_and_fraction_to_storage},
     integer::storage_to_bigint_and_sign,
 };
 
-pub fn datetime_to_parts(datetime: &NaiveDateTime) -> (bool, Integer, u32) {
-    let mut seconds = Integer::from(datetime.timestamp());
-    let is_neg = seconds < 0;
-    let mut nanos = datetime.timestamp_subsec_nanos();
+pub fn datetime_to_parts(datetime: &NaiveDateTime) -> (bool, BigInt, u32) {
+    let mut seconds = BigInt::from(datetime.and_utc().timestamp());
+    let is_neg = seconds < BigInt::from(0);
+    let mut nanos = datetime.and_utc().timestamp_subsec_nanos();
     if is_neg && nanos != 0 {
         seconds += 1;
         nanos = 1_000_000_000 - nanos;
@@ -39,7 +40,7 @@ pub fn storage_to_datetime<B: Buf>(bytes: &mut B) -> NaiveDateTime {
         .to_i64()
         .expect("This is a surprisingly large number of seconds!");
     if fraction.is_empty() {
-        NaiveDateTime::from_timestamp_opt(seconds, 0).unwrap()
+        DateTime::from_timestamp(seconds, 0).unwrap().naive_utc()
     } else {
         let zeros = "0".repeat(9 - fraction.len());
         let fraction = format!("{fraction}{zeros}");
@@ -47,9 +48,9 @@ pub fn storage_to_datetime<B: Buf>(bytes: &mut B) -> NaiveDateTime {
             .parse::<u32>()
             .expect("Nano seconds should actually fit in u32");
         if is_pos {
-            NaiveDateTime::from_timestamp_opt(seconds, nanos).unwrap()
+            DateTime::from_timestamp(seconds, nanos).unwrap().naive_utc()
         } else {
-            NaiveDateTime::from_timestamp_opt(seconds - 1, 1_000_000_000 - nanos).unwrap()
+            DateTime::from_timestamp(seconds - 1, 1_000_000_000 - nanos).unwrap().naive_utc()
         }
     }
 }
@@ -57,14 +58,15 @@ pub fn storage_to_datetime<B: Buf>(bytes: &mut B) -> NaiveDateTime {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use num_bigint::BigInt;
 
     use super::*;
 
     #[test]
     fn a_few_nanos_before_epoch() {
-        let dt = NaiveDateTime::from_timestamp_opt(-1, 234).unwrap();
+        let dt = DateTime::from_timestamp(-1, 234).unwrap().naive_utc();
         let result = datetime_to_parts(&dt);
-        assert_eq!((true, Integer::from(0), 999999766_u32), result)
+        assert_eq!((true, BigInt::from(0), 999999766_u32), result)
     }
 
     #[test]
@@ -81,7 +83,7 @@ mod tests {
             .and_hms_nano_opt(hour, minute, second, nano)
             .unwrap();
         let result = datetime_to_parts(&dt);
-        assert_eq!((false, Integer::from(1036409412), 333_000_000_u32), result);
+        assert_eq!((false, BigInt::from(1036409412), 333_000_000_u32), result);
         let storage = datetime_to_storage(&dt);
         let dt_storage = storage_to_datetime(&mut storage.as_slice());
         assert_eq!(dt, dt_storage)
@@ -101,7 +103,7 @@ mod tests {
             .and_hms_nano_opt(hour, minute, second, nano)
             .unwrap();
         let result = datetime_to_parts(&dt);
-        assert_eq!((false, Integer::from(1036409412), 333_u32), result);
+        assert_eq!((false, BigInt::from(1036409412), 333_u32), result);
         let storage = datetime_to_storage(&dt);
         let dt_storage = storage_to_datetime(&mut storage.as_slice());
         assert_eq!(dt, dt_storage)
@@ -121,7 +123,7 @@ mod tests {
             .and_hms_nano_opt(hour, minute, second, nano)
             .unwrap();
         let result = datetime_to_parts(&dt);
-        assert_eq!((true, Integer::from(-322704000), 0_u32), result);
+        assert_eq!((true, BigInt::from(-322704000), 0_u32), result);
         let storage = datetime_to_storage(&dt);
         let dt_storage = storage_to_datetime(&mut storage.as_slice());
         assert_eq!(dt, dt_storage)
@@ -141,7 +143,7 @@ mod tests {
             .and_hms_nano_opt(hour, minute, second, nano)
             .unwrap();
         let result = datetime_to_parts(&dt);
-        assert_eq!((true, Integer::from(-322703999), 999999997_u32), result);
+        assert_eq!((true, BigInt::from(-322703999), 999999997_u32), result);
         let storage = datetime_to_storage(&dt);
         let dt_storage = storage_to_datetime(&mut storage.as_slice());
         assert_eq!(dt, dt_storage)

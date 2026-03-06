@@ -1,8 +1,9 @@
 use super::integer::{bigint_to_storage, storage_to_bigint_and_sign, NEGATIVE_ZERO};
 use bytes::Buf;
-use lazy_static::lazy_static;
+use num_bigint::BigInt;
+use num_traits::Zero;
 use regex::Regex;
-use rug::Integer;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[derive(PartialEq, Debug)]
@@ -22,10 +23,9 @@ impl Decimal {
 }
 
 pub fn validate_decimal(s: &str) -> Result<(), DecimalValidationError> {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"^-?\d+(\.\d+)?([eE@](-|\+)?\d+)?$").unwrap();
-    }
-    if RE.is_match(s) {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^-?\d+(\.\d+)?([eE@](-|\+)?\d+)?$").unwrap());
+    if re.is_match(s) {
         Ok(())
     } else {
         Err(DecimalValidationError {
@@ -110,23 +110,26 @@ pub fn decode_fraction<B: Buf>(fraction_buf: &mut B, is_pos: bool) -> String {
     }
 }
 
+
 pub fn decimal_to_storage(decimal: &str) -> Vec<u8> {
-    lazy_static! {
-        static ref STD: Regex = Regex::new(r"^-?\d+(\.\d*)?$").unwrap();
-        static ref SCIENTIFIC: Regex = Regex::new(
-            r"^(?P<sign>-)?(?P<integer>\d+)(\.(?P<fraction>\d+))?([eE@](?P<exp>(-|\+)?\d+))?$"
+    static STD: OnceLock<Regex> = OnceLock::new();
+    static SCIENTIFIC: OnceLock<Regex> = OnceLock::new();
+    let std_re = STD.get_or_init(|| Regex::new(r"^-?\d+(\.\d*)?$").unwrap());
+    let sci_re = SCIENTIFIC.get_or_init(|| {
+        Regex::new(
+            r"^(?P<sign>-)?(?P<integer>\d+)(\.(?P<fraction>\d+))?([eE@](?P<exp>(-|\+)?\d+))?$",
         )
-        .unwrap();
-    }
-    if STD.is_match(decimal) {
+        .unwrap()
+    });
+    if std_re.is_match(decimal) {
         let mut parts = decimal.split('.');
         let bigint = parts.next().unwrap_or(decimal);
         let fraction = parts.next();
-        let integer_part = bigint.parse::<Integer>().unwrap();
+        let integer_part = bigint.parse::<BigInt>().unwrap();
         let is_neg = decimal.starts_with('-');
         integer_and_fraction_to_storage(is_neg, integer_part, fraction)
     } else {
-        let captures = SCIENTIFIC.captures(decimal).unwrap(); // prevalidated
+        let captures = sci_re.captures(decimal).unwrap(); // prevalidated
         let is_neg = captures.name("sign").is_some();
         let exp: i32 = if let Some(exp_string) = captures.name("exp") {
             exp_string.as_str().parse::<i32>().unwrap()
@@ -153,8 +156,8 @@ pub fn decimal_to_storage(decimal: &str) -> Vec<u8> {
         let sign = if is_neg { -1 } else { 1 };
         let integer_part = sign
             * integer_str
-                .parse::<Integer>()
-                .unwrap_or_else(|_| Integer::from(0));
+                .parse::<BigInt>()
+                .unwrap_or_else(|_| BigInt::from(0));
         let fraction = &combined[shift..];
         let fraction = if fraction.is_empty() {
             None
@@ -171,18 +174,18 @@ pub fn storage_to_decimal<B: Buf>(bytes: &mut B) -> String {
     if fraction.is_empty() {
         format!("{int:}")
     } else {
-        let sign = if int == 0 && !is_pos { "-" } else { "" };
+        let sign = if int.is_zero() && !is_pos { "-" } else { "" };
         format!("{sign:}{int:}.{fraction:}")
     }
 }
 
 pub fn integer_and_fraction_to_storage(
     is_neg: bool,
-    integer: Integer,
+    integer: BigInt,
     fraction: Option<&str>,
 ) -> Vec<u8> {
     let prefix = bigint_to_storage(integer.clone());
-    let mut prefix = if integer == 0 && is_neg {
+    let mut prefix = if integer.is_zero() && is_neg {
         vec![NEGATIVE_ZERO] // negative zero
     } else {
         prefix

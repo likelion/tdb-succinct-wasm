@@ -4,6 +4,7 @@
 ///
 /// For each bit, starting from the msb and ending with the lsb, if the bit is `1`, the iterator
 /// produces `true`, and if the bit is `0`, the iterator produces `false`.
+#[allow(dead_code)]
 pub(crate) struct BitIter {
     /// The value whose bits are iterated through.
     value: u64,
@@ -16,6 +17,7 @@ pub(crate) struct BitIter {
 
 impl BitIter {
     /// Create a `BitIter` from a `u64`.
+    #[allow(dead_code)]
     pub(crate) const fn new(value: u64) -> Self {
         BitIter {
             value,

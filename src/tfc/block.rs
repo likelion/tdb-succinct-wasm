@@ -1,12 +1,11 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Read};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use itertools::Either;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
     util::{find_common_prefix, find_common_prefix_ord},
@@ -102,23 +101,25 @@ impl SizedBlockHeader {
         })
     }
 
-    pub async fn parse_from_reader<R: AsyncRead + Unpin>(
+    pub fn parse_from_reader<R: Read>(
         mut reader: R,
     ) -> Result<Self, SizedDictReaderError> {
-        let cw = reader.read_u8().await?;
+        let mut cw_buf = [0u8; 1];
+        reader.read_exact(&mut cw_buf)?;
+        let cw = cw_buf[0];
 
         let (record_size, num_entries) = parse_block_control_word(cw);
         let mut sizes = [0_usize; BLOCK_SIZE - 1];
         let mut shareds = [0_usize; BLOCK_SIZE - 1];
-        let (first_size, _) = vbyte::decode_reader(&mut reader).await?;
+        let (first_size, _) = vbyte::decode_reader(&mut reader)?;
 
         let mut head = vec![0; first_size as usize];
-        reader.read_exact(&mut head).await?;
+        reader.read_exact(&mut head)?;
 
         for i in 0..(num_entries - 1) as usize {
-            let (shared, _) = vbyte::decode_reader(&mut reader).await?;
+            let (shared, _) = vbyte::decode_reader(&mut reader)?;
             let size = if record_size == None {
-                let (size, _) = vbyte::decode_reader(&mut reader).await?;
+                let (size, _) = vbyte::decode_reader(&mut reader)?;
                 size
             } else {
                 record_size.unwrap() as u64 - shared
@@ -211,7 +212,7 @@ impl SizedDictEntry {
         v
     }
 
-    pub fn as_buf(&self) -> SizedDictEntryBuf {
+    pub fn as_buf(&self) -> SizedDictEntryBuf<'_> {
         SizedDictEntryBuf {
             entry: Cow::Borrowed(self),
             slice_ix: 0,
@@ -495,12 +496,12 @@ impl SizedDictBlock {
         Ok(Self { header, data })
     }
 
-    pub async fn parse_from_reader<R: AsyncRead + Unpin>(
+    pub fn parse_from_reader<R: Read>(
         mut reader: R,
     ) -> Result<Self, SizedDictReaderError> {
-        let header = SizedBlockHeader::parse_from_reader(&mut reader).await?;
+        let header = SizedBlockHeader::parse_from_reader(&mut reader)?;
         let mut data = vec![0; header.buffer_length];
-        reader.read_exact(&mut data).await?;
+        reader.read_exact(&mut data)?;
 
         Ok(Self {
             header,

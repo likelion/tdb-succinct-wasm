@@ -1,15 +1,12 @@
 //! A succinct data structure for quick lookup of entry positions in a sequence.
 
 use bitvec::vec::BitVec;
-use futures::Stream;
-use futures::TryStreamExt;
 
 use crate::storage::{FileLoad, FileStore};
 
 use super::bitarray::*;
 use super::bitindex::*;
 use super::logarray::*;
-use super::util;
 
 use std::convert::TryInto;
 use std::io;
@@ -273,41 +270,8 @@ fn push_to_fragments(num: u64, width: u8, fragments: &mut Vec<FragmentBuilder>) 
     }
 }
 
-/// Build a wavelet tree from a stream
-pub async fn build_wavelet_tree_from_stream<
-    S: Stream<Item = io::Result<u64>> + Unpin,
-    F: 'static + FileLoad + FileStore,
->(
-    width: u8,
-    mut source: S,
-    destination_bits: F,
-    destination_blocks: F,
-    destination_sblocks: F,
-) -> io::Result<()> {
-    let mut bits = BitArrayFileBuilder::new(destination_bits.open_write().await?);
-    let mut fragments = create_fragments(width);
-
-    while let Some(num) = source.try_next().await? {
-        push_to_fragments(num, width, &mut fragments);
-    }
-
-    let iter = fragments.into_iter().flat_map(|f| f.into_iter());
-
-    bits.push_all(util::stream_iter_ok(iter)).await?;
-    bits.finalize().await?;
-
-    build_bitindex(
-        destination_bits.open_read().await?,
-        destination_blocks.open_write().await?,
-        destination_sblocks.open_write().await?,
-    )
-    .await?;
-
-    Ok(())
-}
-
 /// Build a wavelet tree from an iterator
-pub async fn build_wavelet_tree_from_iter<
+pub fn build_wavelet_tree_from_iter<
     I: Iterator<Item = u64>,
     F: 'static + FileLoad + FileStore,
 >(
@@ -317,7 +281,7 @@ pub async fn build_wavelet_tree_from_iter<
     destination_blocks: F,
     destination_sblocks: F,
 ) -> io::Result<()> {
-    let mut bits = BitArrayFileBuilder::new(destination_bits.open_write().await?);
+    let mut bits = BitArrayFileBuilder::new(destination_bits.open_write()?);
     let mut fragments = create_fragments(width);
 
     for num in source {
@@ -326,40 +290,39 @@ pub async fn build_wavelet_tree_from_iter<
 
     let iter = fragments.into_iter().flat_map(|f| f.into_iter());
 
-    bits.push_all(util::stream_iter_ok(iter)).await?;
-    bits.finalize().await?;
+    bits.push_all(iter)?;
+    bits.finalize()?;
 
     build_bitindex(
-        destination_bits.open_read().await?,
-        destination_blocks.open_write().await?,
-        destination_sblocks.open_write().await?,
-    )
-    .await?;
+        &destination_bits.map()?[..],
+        destination_blocks.open_write()?,
+        destination_sblocks.open_write()?,
+    )?;
 
     Ok(())
 }
 
 /// Build a wavelet tree from a file storing a logarray.
-pub async fn build_wavelet_tree_from_logarray<
+pub fn build_wavelet_tree_from_logarray<
     FLoad: 'static + FileLoad,
     F: 'static + FileLoad + FileStore,
 >(
-    source: FLoad,
+    source: &FLoad,
     destination_bits: F,
     destination_blocks: F,
     destination_sblocks: F,
 ) -> io::Result<()> {
-    let (_, width) = logarray_file_get_length_and_width(source.clone()).await?;
-    let stream = logarray_stream_entries(source).await?;
+    let (_, width) = logarray_file_get_length_and_width(source)?;
+    let mapped = source.map()?;
+    let logarray = LogArray::parse(mapped)?;
 
-    build_wavelet_tree_from_stream(
+    build_wavelet_tree_from_iter(
         width,
-        stream,
+        logarray.iter(),
         destination_bits,
         destination_blocks,
         destination_sblocks,
-    )
-    .await?;
+    )?;
 
     Ok(())
 }
@@ -369,104 +332,74 @@ mod tests {
     use crate::storage::memory::MemoryBackedStore;
 
     use super::*;
-    use futures::executor::block_on;
+
+    fn build_wavelet(width: u8, contents: Vec<u64>) -> WaveletTree {
+        let wavelet_bits_file = MemoryBackedStore::new();
+        let wavelet_blocks_file = MemoryBackedStore::new();
+        let wavelet_sblocks_file = MemoryBackedStore::new();
+
+        build_wavelet_tree_from_iter(
+            width,
+            contents.into_iter(),
+            wavelet_bits_file.clone(),
+            wavelet_blocks_file.clone(),
+            wavelet_sblocks_file.clone(),
+        )
+        .unwrap();
+
+        let wavelet_bits = wavelet_bits_file.map().unwrap();
+        let wavelet_blocks = wavelet_blocks_file.map().unwrap();
+        let wavelet_sblocks = wavelet_sblocks_file.map().unwrap();
+
+        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
+        WaveletTree::from_parts(wavelet_bitindex, width)
+    }
 
     #[test]
     fn generate_and_decode_wavelet_tree_from_vec() {
         let contents = vec![21, 1, 30, 13, 23, 21, 3, 0, 21, 21, 12, 11];
-        let contents_closure = contents.clone();
-        let contents_len = contents.len();
+        let wavelet_tree = build_wavelet(5, contents.clone());
 
-        let wavelet_bits_file = MemoryBackedStore::new();
-        let wavelet_blocks_file = MemoryBackedStore::new();
-        let wavelet_sblocks_file = MemoryBackedStore::new();
-
-        block_on(build_wavelet_tree_from_iter(
-            5,
-            contents_closure.into_iter(),
-            wavelet_bits_file.clone(),
-            wavelet_blocks_file.clone(),
-            wavelet_sblocks_file.clone(),
-        ))
-        .unwrap();
-
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
-
-        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
-        let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 5);
-
-        assert_eq!(contents_len, wavelet_tree.len());
-
+        assert_eq!(contents.len(), wavelet_tree.len());
         assert_eq!(contents, wavelet_tree.decode().collect::<Vec<_>>());
     }
 
-    #[tokio::test]
-    async fn generate_and_decode_wavelet_tree_from_logarray() {
+    #[test]
+    fn generate_and_decode_wavelet_tree_from_logarray() {
         let logarray_file = MemoryBackedStore::new();
         let mut logarray_builder =
-            LogArrayFileBuilder::new(logarray_file.open_write().await.unwrap(), 5);
+            LogArrayFileBuilder::new(logarray_file.open_write().unwrap(), 5);
         let contents = vec![21, 1, 30, 13, 23, 21, 3, 0, 21, 21, 12, 11];
-        let contents_len = contents.len();
-        block_on(async {
-            logarray_builder
-                .push_all(util::stream_iter_ok(contents.clone()))
-                .await?;
-            logarray_builder.finalize().await?;
-
-            Ok::<_, io::Error>(())
-        })
-        .unwrap();
+        logarray_builder.push_all(contents.clone().into_iter()).unwrap();
+        logarray_builder.finalize().unwrap();
 
         let wavelet_bits_file = MemoryBackedStore::new();
         let wavelet_blocks_file = MemoryBackedStore::new();
         let wavelet_sblocks_file = MemoryBackedStore::new();
 
-        block_on(build_wavelet_tree_from_logarray(
-            logarray_file,
+        build_wavelet_tree_from_logarray(
+            &logarray_file,
             wavelet_bits_file.clone(),
             wavelet_blocks_file.clone(),
             wavelet_sblocks_file.clone(),
-        ))
+        )
         .unwrap();
 
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
+        let wavelet_bits = wavelet_bits_file.map().unwrap();
+        let wavelet_blocks = wavelet_blocks_file.map().unwrap();
+        let wavelet_sblocks = wavelet_sblocks_file.map().unwrap();
 
         let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
         let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 5);
 
-        assert_eq!(contents_len, wavelet_tree.len());
-
+        assert_eq!(contents.len(), wavelet_tree.len());
         assert_eq!(contents, wavelet_tree.decode().collect::<Vec<_>>());
     }
 
     #[test]
     fn slice_wavelet_tree() {
         let contents = vec![8, 3, 8, 8, 1, 2, 3, 2, 8, 9, 3, 3, 6, 7, 0, 4, 8, 7, 3];
-        let contents_closure = contents.clone();
-
-        let wavelet_bits_file = MemoryBackedStore::new();
-        let wavelet_blocks_file = MemoryBackedStore::new();
-        let wavelet_sblocks_file = MemoryBackedStore::new();
-
-        block_on(build_wavelet_tree_from_iter(
-            4,
-            contents_closure.into_iter(),
-            wavelet_bits_file.clone(),
-            wavelet_blocks_file.clone(),
-            wavelet_sblocks_file.clone(),
-        ))
-        .unwrap();
-
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
-
-        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
-        let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 4);
+        let wavelet_tree = build_wavelet(4, contents);
 
         let slice = wavelet_tree.lookup(8).unwrap();
         assert_eq!(vec![0, 2, 3, 8, 16], slice.iter().collect::<Vec<_>>());
@@ -480,84 +413,21 @@ mod tests {
 
     #[test]
     fn empty_wavelet_tree() {
-        let contents = Vec::new();
-        let contents_closure = contents.clone();
-
-        let wavelet_bits_file = MemoryBackedStore::new();
-        let wavelet_blocks_file = MemoryBackedStore::new();
-        let wavelet_sblocks_file = MemoryBackedStore::new();
-
-        block_on(build_wavelet_tree_from_iter(
-            4,
-            contents_closure.into_iter(),
-            wavelet_bits_file.clone(),
-            wavelet_blocks_file.clone(),
-            wavelet_sblocks_file.clone(),
-        ))
-        .unwrap();
-
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
-
-        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
-        let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 4);
-
+        let wavelet_tree = build_wavelet(4, Vec::new());
         assert!(wavelet_tree.lookup(3).is_none());
     }
 
     #[test]
     fn lookup_wavelet_beyond_end() {
         let contents = vec![8, 3, 8, 8, 1, 2, 3, 2, 8, 9, 3, 3, 6, 7, 0, 4, 8, 7, 3];
-        let contents_closure = contents.clone();
-
-        let wavelet_bits_file = MemoryBackedStore::new();
-        let wavelet_blocks_file = MemoryBackedStore::new();
-        let wavelet_sblocks_file = MemoryBackedStore::new();
-
-        block_on(build_wavelet_tree_from_iter(
-            4,
-            contents_closure.into_iter(),
-            wavelet_bits_file.clone(),
-            wavelet_blocks_file.clone(),
-            wavelet_sblocks_file.clone(),
-        ))
-        .unwrap();
-
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
-
-        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
-        let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 4);
-
+        let wavelet_tree = build_wavelet(4, contents);
         assert!(wavelet_tree.lookup(100).is_none());
     }
 
     #[test]
     fn lookup_wavelet_with_just_one_char_type() {
         let contents = vec![5, 5, 5, 5, 5, 5, 5, 5, 5, 5];
-        let contents_closure = contents.clone();
-
-        let wavelet_bits_file = MemoryBackedStore::new();
-        let wavelet_blocks_file = MemoryBackedStore::new();
-        let wavelet_sblocks_file = MemoryBackedStore::new();
-
-        block_on(build_wavelet_tree_from_iter(
-            4,
-            contents_closure.into_iter(),
-            wavelet_bits_file.clone(),
-            wavelet_blocks_file.clone(),
-            wavelet_sblocks_file.clone(),
-        ))
-        .unwrap();
-
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
-
-        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
-        let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 4);
+        let wavelet_tree = build_wavelet(4, contents);
 
         assert_eq!(
             vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -570,27 +440,7 @@ mod tests {
     #[test]
     fn wavelet_lookup_one() {
         let contents = vec![3, 6, 2, 1, 8, 5, 4, 7];
-        let contents_closure = contents.clone();
-
-        let wavelet_bits_file = MemoryBackedStore::new();
-        let wavelet_blocks_file = MemoryBackedStore::new();
-        let wavelet_sblocks_file = MemoryBackedStore::new();
-
-        block_on(build_wavelet_tree_from_iter(
-            4,
-            contents_closure.into_iter(),
-            wavelet_bits_file.clone(),
-            wavelet_blocks_file.clone(),
-            wavelet_sblocks_file.clone(),
-        ))
-        .unwrap();
-
-        let wavelet_bits = block_on(wavelet_bits_file.map()).unwrap();
-        let wavelet_blocks = block_on(wavelet_blocks_file.map()).unwrap();
-        let wavelet_sblocks = block_on(wavelet_sblocks_file.map()).unwrap();
-
-        let wavelet_bitindex = BitIndex::from_maps(wavelet_bits, wavelet_blocks, wavelet_sblocks);
-        let wavelet_tree = WaveletTree::from_parts(wavelet_bitindex, 4);
+        let wavelet_tree = build_wavelet(4, contents);
 
         assert_eq!(Some(3), wavelet_tree.lookup_one(1));
         assert_eq!(Some(2), wavelet_tree.lookup_one(2));
