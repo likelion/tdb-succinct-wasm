@@ -82,3 +82,45 @@ impl FileLoad for MemoryBackedStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::io::Read;
+
+    proptest! {
+        /// **Validates: Requirements 6.3, 6.4**
+        ///
+        /// Property 2: MemoryBackedStore Write/Read Round-Trip
+        /// For any arbitrary byte sequence, writing it to a MemoryBackedStore,
+        /// calling sync_all, and then reading it back via both `map` and
+        /// `open_read` must return the exact same bytes.
+        #[test]
+        fn prop_memory_backed_store_write_read_roundtrip(data in proptest::collection::vec(any::<u8>(), 1..1024)) {
+            let store = MemoryBackedStore::new();
+
+            // Write data and sync
+            let mut writer = store.open_write().unwrap();
+            writer.write_all(&data).unwrap();
+            writer.sync_all().unwrap();
+
+            // Read back via map
+            let mapped = store.map().unwrap();
+            prop_assert_eq!(&mapped[..], &data[..], "map() returned different data");
+
+            // Read back via open_read
+            let mut reader = store.open_read().unwrap();
+            let mut read_buf = Vec::new();
+            reader.read_to_end(&mut read_buf).unwrap();
+            prop_assert_eq!(&read_buf, &data, "open_read() returned different data");
+
+            // Verify size
+            let size = store.size().unwrap();
+            prop_assert_eq!(size, data.len(), "size() mismatch");
+
+            // Verify exists
+            prop_assert!(store.exists().unwrap(), "exists() should be true after write");
+        }
+    }
+}
