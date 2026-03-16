@@ -271,10 +271,7 @@ fn push_to_fragments(num: u64, width: u8, fragments: &mut Vec<FragmentBuilder>) 
 }
 
 /// Build a wavelet tree from an iterator
-pub fn build_wavelet_tree_from_iter<
-    I: Iterator<Item = u64>,
-    F: 'static + FileLoad + FileStore,
->(
+pub fn build_wavelet_tree_from_iter<I: Iterator<Item = u64>, F: 'static + FileLoad + FileStore>(
     width: u8,
     source: I,
     destination_bits: F,
@@ -367,10 +364,11 @@ mod tests {
     #[test]
     fn generate_and_decode_wavelet_tree_from_logarray() {
         let logarray_file = MemoryBackedStore::new();
-        let mut logarray_builder =
-            LogArrayFileBuilder::new(logarray_file.open_write().unwrap(), 5);
+        let mut logarray_builder = LogArrayFileBuilder::new(logarray_file.open_write().unwrap(), 5);
         let contents = vec![21, 1, 30, 13, 23, 21, 3, 0, 21, 21, 12, 11];
-        logarray_builder.push_all(contents.clone().into_iter()).unwrap();
+        logarray_builder
+            .push_all(contents.clone().into_iter())
+            .unwrap();
         logarray_builder.finalize().unwrap();
 
         let wavelet_bits_file = MemoryBackedStore::new();

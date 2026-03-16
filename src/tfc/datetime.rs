@@ -48,9 +48,13 @@ pub fn storage_to_datetime<B: Buf>(bytes: &mut B) -> NaiveDateTime {
             .parse::<u32>()
             .expect("Nano seconds should actually fit in u32");
         if is_pos {
-            DateTime::from_timestamp(seconds, nanos).unwrap().naive_utc()
+            DateTime::from_timestamp(seconds, nanos)
+                .unwrap()
+                .naive_utc()
         } else {
-            DateTime::from_timestamp(seconds - 1, 1_000_000_000 - nanos).unwrap().naive_utc()
+            DateTime::from_timestamp(seconds - 1, 1_000_000_000 - nanos)
+                .unwrap()
+                .naive_utc()
         }
     }
 }

@@ -43,9 +43,7 @@ impl FileLoad for FileBackedStore {
     }
 
     fn open_read_from(&self, offset: usize) -> io::Result<std::fs::File> {
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .open(&self.path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).open(&self.path)?;
 
         file.seek(SeekFrom::Start(offset as u64))?;
 

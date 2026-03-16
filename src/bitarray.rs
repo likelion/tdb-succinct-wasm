@@ -385,10 +385,7 @@ mod tests {
         writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(BitArrayError::InputBufferTooSmall(3)).to_string(),
-            bitarray_len_from_file(&store)
-                .err()
-                .unwrap()
-                .to_string()
+            bitarray_len_from_file(&store).err().unwrap().to_string()
         );
 
         let store = MemoryBackedStore::new();
@@ -397,10 +394,7 @@ mod tests {
         writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(BitArrayError::UnexpectedInputBufferSize(8, 16, 2)).to_string(),
-            bitarray_len_from_file(&store)
-                .err()
-                .unwrap()
-                .to_string()
+            bitarray_len_from_file(&store).err().unwrap().to_string()
         );
     }
 }

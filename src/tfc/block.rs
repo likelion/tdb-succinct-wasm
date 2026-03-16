@@ -101,9 +101,7 @@ impl SizedBlockHeader {
         })
     }
 
-    pub fn parse_from_reader<R: Read>(
-        mut reader: R,
-    ) -> Result<Self, SizedDictReaderError> {
+    pub fn parse_from_reader<R: Read>(mut reader: R) -> Result<Self, SizedDictReaderError> {
         let mut cw_buf = [0u8; 1];
         reader.read_exact(&mut cw_buf)?;
         let cw = cw_buf[0];
@@ -496,9 +494,7 @@ impl SizedDictBlock {
         Ok(Self { header, data })
     }
 
-    pub fn parse_from_reader<R: Read>(
-        mut reader: R,
-    ) -> Result<Self, SizedDictReaderError> {
+    pub fn parse_from_reader<R: Read>(mut reader: R) -> Result<Self, SizedDictReaderError> {
         let header = SizedBlockHeader::parse_from_reader(&mut reader)?;
         let mut data = vec![0; header.buffer_length];
         reader.read_exact(&mut data)?;

@@ -8,8 +8,8 @@ use base64::display::Base64Display;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use chrono::{NaiveDateTime, NaiveTime};
-use num_derive::FromPrimitive;
 use num_bigint::BigInt;
+use num_derive::FromPrimitive;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, FromPrimitive, Hash)]
 pub enum Datatype {

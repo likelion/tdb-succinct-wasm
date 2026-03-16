@@ -31,10 +31,7 @@ pub fn find_common_prefix_ord(b1: &[u8], b2: &[u8]) -> (usize, Ordering) {
     }
 }
 
-pub fn write_nul_terminated_bytes<W: Write>(
-    w: &mut W,
-    bytes: &[u8],
-) -> io::Result<usize> {
+pub fn write_nul_terminated_bytes<W: Write>(w: &mut W, bytes: &[u8]) -> io::Result<usize> {
     w.write_all(bytes)?;
     w.write_all(&[0])?;
 
@@ -44,11 +41,7 @@ pub fn write_nul_terminated_bytes<W: Write>(
 }
 
 /// Write padding bytes to `w`.
-pub fn write_padding<W: Write>(
-    w: &mut W,
-    current_pos: usize,
-    width: u8,
-) -> io::Result<()> {
+pub fn write_padding<W: Write>(w: &mut W, current_pos: usize, width: u8) -> io::Result<()> {
     let required_padding = (width as usize - current_pos % width as usize) % width as usize;
     w.write_all(&vec![0; required_padding])?;
 
@@ -86,9 +79,7 @@ pub fn heap_sorted_iter<'a, T: Ord, I: 'a + Iterator<Item = T> + Send>(
     }
 }
 
-impl<'a, T: Ord, I: 'a + Iterator<Item = T> + Send> Iterator
-    for HeapSortedIterator<'a, T, I>
-{
+impl<'a, T: Ord, I: 'a + Iterator<Item = T> + Send> Iterator for HeapSortedIterator<'a, T, I> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -196,11 +187,7 @@ mod tests {
         let v2 = vec![7, 9, 15];
         let v3 = vec![0, 1, 2, 3, 4];
 
-        let iters = vec![
-            v1.into_iter(),
-            v2.into_iter(),
-            v3.into_iter(),
-        ];
+        let iters = vec![v1.into_iter(), v2.into_iter(), v3.into_iter()];
 
         let sorted = heap_sorted_iter(iters);
 

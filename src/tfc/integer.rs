@@ -86,9 +86,7 @@ pub fn bigint_to_storage(bigint: BigInt) -> Vec<u8> {
     let size_bytes = size_encode(num_bytes);
     let mut number_vec = Vec::with_capacity(size_bytes.len() + num_bytes as usize + 1);
     for _ in 0..num_bytes {
-        let byte = (&int & &BigInt::from(0xFFu8))
-            .to_u8()
-            .unwrap_or(0);
+        let byte = (&int & &BigInt::from(0xFFu8)).to_u8().unwrap_or(0);
         number_vec.push(byte);
         int >>= 8u32;
     }

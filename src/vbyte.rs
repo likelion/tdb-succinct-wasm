@@ -123,9 +123,7 @@ pub fn decode_buf<B: Buf>(buf: &mut B) -> Result<(u64, usize), DecodeError> {
 }
 
 /// Decodes a `u64` from a synchronous reader.
-pub fn decode_reader<R: Read>(
-    reader: &mut R,
-) -> Result<(u64, usize), DecodeReaderError> {
+pub fn decode_reader<R: Read>(reader: &mut R) -> Result<(u64, usize), DecodeReaderError> {
     let mut num: u64 = 0;
     let mut shift: u32 = 0;
     let mut count = 0;

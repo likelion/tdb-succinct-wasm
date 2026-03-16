@@ -394,10 +394,7 @@ impl BitIndex {
     }
 }
 
-pub fn build_bitindex<
-    W1: 'static + SyncableFile,
-    W2: 'static + SyncableFile,
->(
+pub fn build_bitindex<W1: 'static + SyncableFile, W2: 'static + SyncableFile>(
     bitarray: &[u8],
     blocks: W1,
     sblocks: W2,
@@ -486,9 +483,7 @@ pub fn build_bitindex_from_buf<B1: Buf, B2: BufMut, B3: BufMut>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        storage::{memory::MemoryBackedStore, FileLoad, FileStore},
-    };
+    use crate::storage::{memory::MemoryBackedStore, FileLoad, FileStore};
 
     fn build_test_bitindex() -> BitIndex {
         let bits = MemoryBackedStore::new();

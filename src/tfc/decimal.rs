@@ -110,7 +110,6 @@ pub fn decode_fraction<B: Buf>(fraction_buf: &mut B, is_pos: bool) -> String {
     }
 }
 
-
 pub fn decimal_to_storage(decimal: &str) -> Vec<u8> {
     static STD: OnceLock<Regex> = OnceLock::new();
     static SCIENTIFIC: OnceLock<Regex> = OnceLock::new();

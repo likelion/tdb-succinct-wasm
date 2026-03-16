@@ -201,7 +201,11 @@ impl<R: Read> Read for DontReadLastU64Reader<R> {
         new_buf_data.extend_from_slice(&temp[..n]);
 
         // Remove the first `to_output - from_buf` bytes from temp that we already output
-        let already_output_from_temp = if to_output > from_buf { to_output - from_buf } else { 0 };
+        let already_output_from_temp = if to_output > from_buf {
+            to_output - from_buf
+        } else {
+            0
+        };
         let remaining = &new_buf_data[already_output_from_temp..];
 
         self.buf_len = std::cmp::min(remaining.len(), 8);
@@ -320,11 +324,13 @@ mod tests {
         reader.read_exact(&mut buf).unwrap();
         assert_eq!(2, buf[0]);
         // The last 8 bytes are withheld, so reading more should fail
-        assert!(reader.read_exact(&mut buf).is_err() || {
-            let mut remaining = Vec::new();
-            reader.read_to_end(&mut remaining).unwrap();
-            remaining.is_empty()
-        });
+        assert!(
+            reader.read_exact(&mut buf).is_err() || {
+                let mut remaining = Vec::new();
+                reader.read_to_end(&mut remaining).unwrap();
+                remaining.is_empty()
+            }
+        );
     }
 
     #[test]

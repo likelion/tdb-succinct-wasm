@@ -670,10 +670,7 @@ impl<W: SyncableFile> LogArrayFileBuilder<W> {
         Ok(())
     }
 
-    pub fn push_all<I: Iterator<Item = u64>>(
-        &mut self,
-        vals: I,
-    ) -> io::Result<()> {
+    pub fn push_all<I: Iterator<Item = u64>>(&mut self, vals: I) -> io::Result<()> {
         for val in vals {
             self.push(val)?;
         }
@@ -916,7 +913,9 @@ mod tests {
     fn generate_then_parse_works() {
         let store = MemoryBackedStore::new();
         let mut builder = LogArrayFileBuilder::new(store.open_write().unwrap(), 5);
-        builder.push_all(vec![1, 3, 2, 5, 12, 31, 18].into_iter()).unwrap();
+        builder
+            .push_all(vec![1, 3, 2, 5, 12, 31, 18].into_iter())
+            .unwrap();
         builder.finalize().unwrap();
 
         let content = store.map().unwrap();
@@ -932,8 +931,14 @@ mod tests {
     }
 
     const TEST0_DATA: [u8; 8] = [
-        0b00000000, 0b00000000, 0b1_0000000, 0b00000000,
-        0b10_000000, 0b00000000, 0b011_00000, 0b00000000,
+        0b00000000,
+        0b00000000,
+        0b1_0000000,
+        0b00000000,
+        0b10_000000,
+        0b00000000,
+        0b011_00000,
+        0b00000000,
     ];
     const TEST0_CONTROL: [u8; 8] = [0, 0, 0, 3, 17, 0, 0, 0];
 
@@ -986,7 +991,10 @@ mod tests {
         writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(LogArrayError::InputBufferTooSmall(3)).to_string(),
-            logarray_file_get_length_and_width(&store).err().unwrap().to_string()
+            logarray_file_get_length_and_width(&store)
+                .err()
+                .unwrap()
+                .to_string()
         );
 
         let store = MemoryBackedStore::new();
@@ -995,7 +1003,10 @@ mod tests {
         writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(LogArrayError::WidthTooLarge(65)).to_string(),
-            logarray_file_get_length_and_width(&store).err().unwrap().to_string()
+            logarray_file_get_length_and_width(&store)
+                .err()
+                .unwrap()
+                .to_string()
         );
 
         let store = MemoryBackedStore::new();
@@ -1004,7 +1015,10 @@ mod tests {
         writer.sync_all().unwrap();
         assert_eq!(
             io::Error::from(LogArrayError::UnexpectedInputBufferSize(8, 16, 1, 17)).to_string(),
-            logarray_file_get_length_and_width(&store).err().unwrap().to_string()
+            logarray_file_get_length_and_width(&store)
+                .err()
+                .unwrap()
+                .to_string()
         );
     }
 
@@ -1107,4 +1121,3 @@ mod tests {
         assert_eq!(width, out_width);
     }
 }
-

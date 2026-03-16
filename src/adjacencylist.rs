@@ -293,10 +293,7 @@ impl<W1: SyncableFile, W2: SyncableFile> UnindexedAdjacencyListBuilder<W1, W2> {
         Ok(())
     }
 
-    pub fn push_all<I: Iterator<Item = (u64, u64)>>(
-        &mut self,
-        iter: I,
-    ) -> io::Result<()> {
+    pub fn push_all<I: Iterator<Item = (u64, u64)>>(&mut self, iter: I) -> io::Result<()> {
         for (left, right) in iter {
             self.push(left, right)?;
         }
@@ -398,11 +395,7 @@ where
         width: u8,
     ) -> io::Result<AdjacencyListBuilder<F, W1, W2, W3>> {
         Ok(AdjacencyListBuilder {
-            builder: UnindexedAdjacencyListBuilder::new(
-                bitfile.open_write()?,
-                nums_writer,
-                width,
-            ),
+            builder: UnindexedAdjacencyListBuilder::new(bitfile.open_write()?, nums_writer, width),
             bitfile,
             bitindex_blocks,
             bitindex_sblocks,
@@ -413,10 +406,7 @@ where
         self.builder.push(left, right)
     }
 
-    pub fn push_all<I: Iterator<Item = (u64, u64)>>(
-        &mut self,
-        iter: I,
-    ) -> io::Result<()> {
+    pub fn push_all<I: Iterator<Item = (u64, u64)>>(&mut self, iter: I) -> io::Result<()> {
         self.builder.push_all(iter)
     }
 
@@ -429,11 +419,7 @@ where
         } = self;
         builder.finalize()?;
 
-        build_bitindex(
-            &bitfile.map()?[..],
-            bitindex_blocks,
-            bitindex_sblocks,
-        )?;
+        build_bitindex(&bitfile.map()?[..], bitindex_blocks, bitindex_sblocks)?;
 
         Ok(())
     }
@@ -520,17 +506,23 @@ mod tests {
         let contents = vec![(1, 1), (1, 3), (2, 5), (7, 4)];
         let adjacencylist = build_adjacencylist(contents.clone());
 
-        assert_eq!(
-            contents,
-            adjacencylist.iter().collect::<Vec<_>>()
-        );
+        assert_eq!(contents, adjacencylist.iter().collect::<Vec<_>>());
     }
 
     #[test]
     fn pair_at_pos_starting_at_1_returns_correct_pair() {
         let contents = vec![
-            (1, 1), (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
-            (7, 4), (8, 12), (11, 3),
+            (1, 1),
+            (2, 3),
+            (2, 4),
+            (2, 6),
+            (3, 1),
+            (3, 3),
+            (3, 4),
+            (3, 8),
+            (7, 4),
+            (8, 12),
+            (11, 3),
         ];
         let adjacencylist = build_adjacencylist(contents);
 
@@ -540,8 +532,22 @@ mod tests {
 
         assert_eq!(
             vec![
-                (1, 1), (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
-                (4, 0), (5, 0), (6, 0), (7, 4), (8, 12), (9, 0), (10, 0), (11, 3)
+                (1, 1),
+                (2, 3),
+                (2, 4),
+                (2, 6),
+                (3, 1),
+                (3, 3),
+                (3, 4),
+                (3, 8),
+                (4, 0),
+                (5, 0),
+                (6, 0),
+                (7, 4),
+                (8, 12),
+                (9, 0),
+                (10, 0),
+                (11, 3)
             ],
             result
         );
@@ -550,8 +556,16 @@ mod tests {
     #[test]
     fn pair_at_pos_with_skip_returns_correct_pair() {
         let contents = vec![
-            (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
-            (7, 4), (8, 12), (11, 3),
+            (2, 3),
+            (2, 4),
+            (2, 6),
+            (3, 1),
+            (3, 3),
+            (3, 4),
+            (3, 8),
+            (7, 4),
+            (8, 12),
+            (11, 3),
         ];
         let adjacencylist = build_adjacencylist(contents);
 
@@ -561,8 +575,22 @@ mod tests {
 
         assert_eq!(
             vec![
-                (1, 0), (2, 3), (2, 4), (2, 6), (3, 1), (3, 3), (3, 4), (3, 8),
-                (4, 0), (5, 0), (6, 0), (7, 4), (8, 12), (9, 0), (10, 0), (11, 3)
+                (1, 0),
+                (2, 3),
+                (2, 4),
+                (2, 6),
+                (3, 1),
+                (3, 3),
+                (3, 4),
+                (3, 8),
+                (4, 0),
+                (5, 0),
+                (6, 0),
+                (7, 4),
+                (8, 12),
+                (9, 0),
+                (10, 0),
+                (11, 3)
             ],
             result
         );
