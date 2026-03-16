@@ -1,0 +1,8 @@
+tdb-succinct-wasm
+Copyright 2024-2026 Leonid Mokrushin
+
+This product is a derivative work of tdb-succinct,
+originally developed by TerminusDB (https://github.com/terminusdb/terminusdb-store),
+licensed under the Apache License, Version 2.0.
+
+Modifications include removing async/tokio dependencies for WebAssembly compatibility.
