@@ -1,8 +1,9 @@
-# tdb-succinct - succinct data structures used by terminusdb-store
-This repository contains all data structures from terminusdb-store, as
-well as the logic for loading and storing them.
+# tdb-succinct-wasm — succinct data structures used by terminus-store-wasm
 
-Note that these types are pretty unoptimized for standalone use. In
-particular, this crate assumes tokio will be used for loading and
-storing data. The intent is to eventually move such dependencies
-behind feature flags and provide synchronous io strategies as well.
+This repository contains all data structures from
+[terminus-store-wasm](https://github.com/likelion/terminus-store-wasm),
+as well as the logic for loading and storing them.
+
+This is a synchronous fork of
+[tdb-succinct](https://github.com/terminusdb-labs/tdb-succinct),
+with async/tokio dependencies removed for WebAssembly compatibility.

@@ -3,14 +3,13 @@ name = "tdb-succinct-wasm"
 version = "0.1.2"
 authors = [
     "Matthijs van Otterdijk <matthijs@terminusdb.com>",
-    "Gavin Mendel-Gleason <gavin@terminusdb.com>"
+    "Gavin Mendel-Gleason <gavin@terminusdb.com>",
+    "Leonid Mokrushin <likelion@gmail.com>"
 ]
 edition = "2021"
 license = "Apache-2.0"
-description = "succinct data structures used by terminusdb"
-homepage = "https://terminusdb.com"
-repository = "https://github.com/terminusdb-labs/tdb-succinct"
-documentation = "https://docs.rs/tdb-succinct/"
+description = "succinct data structures used by terminus-store-wasm"
+repository = "https://github.com/likelion/tdb-succinct-wasm"
 exclude = [".gitignore", ".github/", "/ci/"]
 
 [dependencies]
